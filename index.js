@@ -1,6 +1,8 @@
 const express = require('express');
 const qrcode = require('qrcode-terminal');
-const { default: makeWASocket } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState } = require('@whiskeysockets/baileys');
+const fs = require('fs').promises;
+const path = require('path');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -23,7 +25,17 @@ app.get('/send', async (req, res) => {
 
 // Função para conectar ao WhatsApp
 const connectToWhatsApp = async () => {
-  const sock = makeWASocket({ printQRInTerminal: false });
+  // Define o diretório para salvar o estado de autenticação
+  const authDir = path.join(__dirname, 'auth_info');
+  const { state, saveCreds } = await useMultiFileAuthState(authDir);
+
+  const sock = makeWASocket({
+    auth: state,
+    printQRInTerminal: false,
+  });
+
+  // Salva as credenciais sempre que atualizadas
+  sock.ev.on('creds.update', saveCreds);
 
   sock.ev.on('connection.update', (update) => {
     const { connection, qr } = update;
