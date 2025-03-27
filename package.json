@@ -1,0 +1,19 @@
+{
+  "name": "whatsapp-api-minima",
+  "version": "1.0.0",
+  "description": "API simples pra WhatsApp",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "baileys": "^6.7.8",
+    "express": "^4.21.2",
+    "qrcode-terminal": "^0.12.0",
+    "pino": "^8.0.0",
+    "crypto": "^1.0.1"
+  },
+  "engines": {
+    "node": "16.x"
+  }
+}
