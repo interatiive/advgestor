@@ -27,16 +27,15 @@ async function connectToWhatsApp() {
   });
 
   sock.ev.on('connection.update', (update) => {
-    const { connection, qr, lastDisconnect } = update;
-
-    if (qr) {
-      console.log('QR code gerado! Escaneie abaixo:');
-      qrcode.generate(qr, { small: true });
-    }
-
-    if (connection === 'open') {
-      console.log('Conectado ao WhatsApp com sucesso!');
-    }
+  const { connection, qr } = update;
+  if (qr) {
+    console.log('QR Code (texto):', qr); // Adicione esta linha
+    qrcode.generate(qr, { small: true });
+  }
+  if (connection === 'open') {
+    console.log('Conectado ao WhatsApp com sucesso!');
+  }
+});
 
     if (connection === 'close') {
       const reason = lastDisconnect?.error?.output?.statusCode;
