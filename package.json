@@ -10,6 +10,7 @@
     "@whiskeysockets/baileys": "^6.7.5",
     "express": "^4.18.2",
     "pino": "^8.20.0",
-    "qrcode-terminal": "^0.12.0"
+    "qrcode-terminal": "^0.12.0",
+    "node-fetch": "^2.7.0"
   }
 }
