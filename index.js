@@ -25,7 +25,6 @@ app.get('/send', async (req, res) => {
 
 // Função para conectar ao WhatsApp
 const connectToWhatsApp = async () => {
-  // Define o diretório para salvar o estado de autenticação
   const authDir = path.join(__dirname, 'auth_info');
   const { state, saveCreds } = await useMultiFileAuthState(authDir);
 
@@ -34,18 +33,17 @@ const connectToWhatsApp = async () => {
     printQRInTerminal: false,
   });
 
-  // Salva as credenciais sempre que atualizadas
   sock.ev.on('creds.update', saveCreds);
 
   sock.ev.on('connection.update', (update) => {
     const { connection, qr } = update;
     if (qr) {
-      console.log('QR Code (texto):', qr); // Exibe o QR como texto
-      qrcode.generate(qr, { small: true }); // Tenta exibir no terminal
+      console.log('QR Code (texto):', qr);
+      qrcode.generate(qr, { small: true });
     }
     if (connection === 'open') {
       console.log('Conectado ao WhatsApp com sucesso!');
-      global.client = sock; // Armazena o client globalmente
+      global.client = sock;
     }
     if (connection === 'close') {
       console.log('Desconectado! Reconectando...');
@@ -54,10 +52,8 @@ const connectToWhatsApp = async () => {
   });
 };
 
-// Inicia o servidor
 app.listen(port, '0.0.0.0', () => {
   console.log(`Servidor rodando na porta ${port}`);
 });
 
-// Conecta ao WhatsApp
 connectToWhatsApp();
