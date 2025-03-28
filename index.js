@@ -1,6 +1,7 @@
 const express = require('express');
 const qrcode = require('qrcode-terminal');
 const { default: makeWASocket, useMultiFileAuthState } = require('@whiskeysockets/baileys');
+const fetch = require('node-fetch');
 const fs = require('fs').promises;
 const path = require('path');
 
@@ -21,6 +22,12 @@ app.get('/send', async (req, res) => {
     console.error('Erro ao enviar mensagem:', error);
     res.status(500).json({ success: false, error: 'Erro ao enviar mensagem' });
   }
+});
+
+// Rota simples pra "ping"
+app.get('/ping', (req, res) => {
+  console.log('Ping recebido! Servidor está ativo.');
+  res.send('Pong!');
 });
 
 // Função para conectar ao WhatsApp
@@ -52,8 +59,25 @@ const connectToWhatsApp = async () => {
   });
 };
 
+// Inicia o servidor
 app.listen(port, '0.0.0.0', () => {
   console.log(`Servidor rodando na porta ${port}`);
 });
 
+// Conecta ao WhatsApp
 connectToWhatsApp();
+
+// Função para "pingar" a si mesmo a cada 12 minutos
+const keepAlive = async () => {
+  const url = 'https://whatsapp-api-render-pqn2.onrender.com/ping';
+  try {
+    const response = await fetch(url);
+    const text = await response.text();
+    console.log(`Keep-alive ping: ${text}`);
+  } catch (error) {
+    console.error('Erro ao fazer keep-alive ping:', error);
+  }
+};
+
+// Executa o ping a cada 12 minutos (720000 ms)
+setInterval(keepAlive, 12 * 60 * 1000);
