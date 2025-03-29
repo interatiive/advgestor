@@ -76,7 +76,7 @@ sock.ev.on('messages.upsert', async ({ messages }) => {
   console.log(`Mensagem recebida de ${senderNumber} (ID da conversa: ${conversationId}): ${text}`);
 
   // Enviar mensagem para o webhook do Make
-  const webhookUrl = 'https://hook.us1.make.com/hlqjchpcqqxrc39zrmbeinkdcfl0aqjn'; // Substitua pelo URL do seu webhook
+  const webhookUrl = 'https://hook.us1.make.com/crkwif3h4cdyvfx7anf4ltla2831r6pr'; // Substitua pelo URL do seu webhook
   try {
     await fetch(webhookUrl, {
       method: 'POST',
