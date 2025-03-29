@@ -10,10 +10,23 @@ const port = process.env.PORT || 3000;
 
 app.use(express.json());
 
-// Rota para enviar mensagem
+// Rota para enviar mensagem (GET e POST)
 app.get('/send', async (req, res) => {
   const { number, message } = req.query;
-  console.log(`Requisição recebida na rota /send: { number: ${number}, message: ${message} }`);
+  console.log(`Requisição GET recebida na rota /send: { number: ${number}, message: ${message} }`);
+  try {
+    await global.client.sendMessage(`${number}@s.whatsapp.net`, { text: message });
+    console.log(`Mensagem enviada com sucesso para: ${number}`);
+    res.json({ success: true, message: `Mensagem enviada pra ${number}` });
+  } catch (error) {
+    console.error('Erro ao enviar mensagem:', error);
+    res.status(500).json({ success: false, error: 'Erro ao enviar mensagem' });
+  }
+});
+
+app.post('/send', async (req, res) => {
+  const { number, message } = req.body;
+  console.log(`Requisição POST recebida na rota /send: { number: ${number}, message: ${message} }`);
   try {
     await global.client.sendMessage(`${number}@s.whatsapp.net`, { text: message });
     console.log(`Mensagem enviada com sucesso para: ${number}`);
@@ -79,5 +92,5 @@ const keepAlive = async () => {
   }
 };
 
-// Executa o ping a cada 12 minutos (720000 ms)
-setInterval(keepAlive, 12 * 60 * 1000);
+// Executa o ping a cada 14 minutos (720000 ms)
+setInterval(keepAlive, 14 * 60 * 1000);
