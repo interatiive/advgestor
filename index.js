@@ -85,6 +85,7 @@ sock.ev.on('messages.upsert', async ({ messages }) => {
         number: senderNumber,
         conversationId: conversationId, // Incluído o ID da conversa
         message: text,
+        name: senderName, // Nome do remetente ou número como fallback
       }),
     });
     console.log('Mensagem enviada para o webhook do Make com sucesso!');
