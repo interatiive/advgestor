@@ -53,8 +53,47 @@ const connectToWhatsApp = async () => {
     printQRInTerminal: false,
   });
 
+  // Evento para salvar credenciais
   sock.ev.on('creds.update', saveCreds);
 
+  // Evento para monitorar mensagens recebidas
+sock.ev.on('messages.upsert', async ({ messages }) => {
+  console.log('Nova mensagem recebida:', messages);
+
+  // Extrair informações da mensagem
+  const msg = messages[0]; // Primeira mensagem no evento
+  if (!msg || !msg.message) return;
+
+  // Verificar se é uma mensagem de texto
+  const messageType = Object.keys(msg.message)[0];
+  if (messageType !== 'conversation' && messageType !== 'extendedTextMessage') return;
+
+  // Extrair número, ID da conversa e texto da mensagem
+  const senderNumber = msg.key.remoteJid.split('@')[0]; // Número do remetente
+  const conversationId = msg.key.id; // ID da conversa
+  const text = msg.message.conversation || msg.message.extendedTextMessage.text;
+
+  console.log(`Mensagem recebida de ${senderNumber} (ID da conversa: ${conversationId}): ${text}`);
+
+  // Enviar mensagem para o webhook do Make
+  const webhookUrl = 'https://hook.us1.make.com/hlqjchpcqqxrc39zrmbeinkdcfl0aqjn'; // Substitua pelo URL do seu webhook
+  try {
+    await fetch(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        number: senderNumber,
+        conversationId: conversationId, // Incluído o ID da conversa
+        message: text,
+      }),
+    });
+    console.log('Mensagem enviada para o webhook do Make com sucesso!');
+  } catch (error) {
+    console.error('Erro ao enviar mensagem para o webhook do Make:', error);
+  }
+});
+
+  // Evento de atualização de conexão
   sock.ev.on('connection.update', (update) => {
     const { connection, qr } = update;
     if (qr) {
@@ -80,7 +119,7 @@ app.listen(port, '0.0.0.0', () => {
 // Conecta ao WhatsApp
 connectToWhatsApp();
 
-// Função para "pingar" a si mesmo a cada 12 minutos
+// Função para "pingar" a si mesmo a cada 14 minutos
 const keepAlive = async () => {
   const url = 'https://whatsapp-api-render-pqn2.onrender.com/ping';
   try {
