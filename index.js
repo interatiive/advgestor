@@ -13,7 +13,14 @@ const WEBHOOK_URL = process.env.WEBHOOK_URL || 'https://hook.us1.make.com/crkwif
 const KEEP_ALIVE_INTERVAL = 14 * 60 * 1000; // 14 minutos
 const FETCH_TIMEOUT = 10_000; // 10 segundos
 
-app.use(express.json());
+// Middleware pra parsear JSON em rotas que não sejam /send
+app.use((req, res, next) => {
+  if (req.path === '/send' && req.method === 'POST') {
+    // Para a rota /send, vamos ler o corpo como texto bruto
+    return next();
+  }
+  express.json()(req, res, next);
+});
 
 // Função para limpar e corrigir JSON
 const cleanAndParseJSON = (data) => {
@@ -53,48 +60,52 @@ const cleanAndParseJSON = (data) => {
     console.error('Erro ao limpar e parsear JSON:', error);
     throw new Error(`Falha ao processar JSON: ${error.message}`);
   }
-};
-
-// Middleware para limpar JSON na rota POST
-app.use('/send', (req, res, next) => {
-  try {
-    if (req.body && Object.keys(req.body).length > 0) {
-      req.body = cleanAndParseJSON(req.body);
-    }
-    next();
-  } catch (error) {
-    res.status(400).json({ success: false, error: error.message });
-  }
 });
 
 // Rota para enviar mensagem (POST)
 app.post('/send', async (req, res) => {
-  const { number, message } = req.body;
+  // Ler o corpo da requisição como texto bruto
+  let rawBody = '';
+  req.setEncoding('utf8');
+  req.on('data', chunk => {
+    rawBody += chunk;
+  });
 
-  // Validação de entrada
-  if (!number || !message) {
-    return res.status(400).json({ success: false, error: 'Número e mensagem são obrigatórios' });
-  }
+  req.on('end', async () => {
+    try {
+      // Limpar e parsear o JSON
+      const body = cleanAndParseJSON(rawBody);
 
-  // Limpar o número (remover +, espaços, traços, etc.)
-  const cleanNumber = number.toString().replace(/[^0-9]/g, '');
-  if (!cleanNumber || cleanNumber.length < 10) {
-    return res.status(400).json({ success: false, error: 'Número de telefone inválido' });
-  }
+      const { number, message } = body;
 
-  console.log(`Requisição POST recebida na rota /send: { number: ${cleanNumber}, message: ${message} }`);
-  try {
-    await global.client.sendMessage(`${cleanNumber}@s.whatsapp.net`, { text: message, linkPreview: false }, { timeout: 60_000 });
-    console.log(`Mensagem enviada com sucesso para: ${cleanNumber}`);
-    res.json({ success: true, message: `Mensagem enviada pra ${cleanNumber}` });
-  } catch (error) {
-    console.error('Erro ao enviar mensagem:', error);
-    if (error.message && error.message.includes('timed out')) {
-      res.status(408).json({ success: false, error: 'Timeout ao enviar mensagem' });
-    } else {
-      res.status(500).json({ success: false, error: 'Erro ao enviar mensagem' });
+      // Validação de entrada
+      if (!number || !message) {
+        return res.status(400).json({ success: false, error: 'Número e mensagem são obrigatórios' });
+      }
+
+      // Limpar o número (remover +, espaços, traços, etc.)
+      const cleanNumber = number.toString().replace(/[^0-9]/g, '');
+      if (!cleanNumber || cleanNumber.length < 10) {
+        return res.status(400).json({ success: false, error: 'Número de telefone inválido' });
+      }
+
+      console.log(`Requisição POST recebida na rota /send: { number: ${cleanNumber}, message: ${message} }`);
+      try {
+        await global.client.sendMessage(`${cleanNumber}@s.whatsapp.net`, { text: message, linkPreview: false }, { timeout: 60_000 });
+        console.log(`Mensagem enviada com sucesso para: ${cleanNumber}`);
+        res.json({ success: true, message: `Mensagem enviada pra ${cleanNumber}` });
+      } catch (error) {
+        console.error('Erro ao enviar mensagem:', error);
+        if (error.message && error.message.includes('timed out')) {
+          res.status(408).json({ success: false, error: 'Timeout ao enviar mensagem' });
+        } else {
+          res.status(500).json({ success: false, error: 'Erro ao enviar mensagem' });
+        }
+      }
+    } catch (error) {
+      res.status(400).json({ success: false, error: error.message });
     }
-  }
+  });
 });
 
 // Rota simples pra "ping"
