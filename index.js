@@ -9,11 +9,63 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 // Configurações
-const WEBHOOK_URL = process.env.WEBHOOK_URL || 'https://hook.us1.make.com/crkwif3h4cdyvfx7anf4ltla2831r6pr'; // Mova isso pra variável de ambiente no Render
+const WEBHOOK_URL = process.env.WEBHOOK_URL || 'https://hook.us1.make.com/crkwif3h4cdyvfx7anf4ltla2831r6pr';
 const KEEP_ALIVE_INTERVAL = 14 * 60 * 1000; // 14 minutos
 const FETCH_TIMEOUT = 10_000; // 10 segundos
 
 app.use(express.json());
+
+// Função para limpar e corrigir JSON
+const cleanAndParseJSON = (data) => {
+  try {
+    // Se já for um objeto, não precisa processar
+    if (typeof data === 'object' && data !== null) {
+      return data;
+    }
+
+    // Converter pra string, caso não seja
+    let jsonString = typeof data === 'string' ? data : JSON.stringify(data);
+
+    // Remover tudo antes do primeiro { e depois do último }
+    const firstBrace = jsonString.indexOf('{');
+    const lastBrace = jsonString.lastIndexOf('}');
+    if (firstBrace === -1 || lastBrace === -1 || firstBrace > lastBrace) {
+      throw new Error('JSON inválido: não contém chaves {}');
+    }
+    jsonString = jsonString.substring(firstBrace, lastBrace + 1);
+
+    // Remover espaços desnecessários no início e fim
+    jsonString = jsonString.trim();
+
+    // Tentar corrigir aspas inválidas (ex.: ' por ")
+    jsonString = jsonString.replace(/'/g, '"');
+
+    // Parsear o JSON
+    const parsed = JSON.parse(jsonString);
+
+    // Garantir que as quebras de linha no campo "message" sejam preservadas
+    if (parsed.message && typeof parsed.message === 'string') {
+      parsed.message = parsed.message.replace(/\\n/g, '\n');
+    }
+
+    return parsed;
+  } catch (error) {
+    console.error('Erro ao limpar e parsear JSON:', error);
+    throw new Error(`Falha ao processar JSON: ${error.message}`);
+  }
+};
+
+// Middleware para limpar JSON na rota POST
+app.use('/send', (req, res, next) => {
+  try {
+    if (req.body && Object.keys(req.body).length > 0) {
+      req.body = cleanAndParseJSON(req.body);
+    }
+    next();
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
 
 // Rota para enviar mensagem (POST)
 app.post('/send', async (req, res) => {
@@ -25,7 +77,7 @@ app.post('/send', async (req, res) => {
   }
 
   // Limpar o número (remover +, espaços, traços, etc.)
-  const cleanNumber = number.replace(/[^0-9]/g, '');
+  const cleanNumber = number.toString().replace(/[^0-9]/g, '');
   if (!cleanNumber || cleanNumber.length < 10) {
     return res.status(400).json({ success: false, error: 'Número de telefone inválido' });
   }
@@ -90,19 +142,23 @@ const connectToWhatsApp = async (retryCount = 0) => {
 
     console.log(`Mensagem recebida de ${senderName} (${senderNumber}) - ID da conversa: ${conversationId}: ${text}`);
 
+    // Preparar os dados pra enviar pro webhook
+    const webhookData = {
+      number: senderNumber,
+      conversationId: conversationId,
+      message: text,
+      name: senderName,
+    };
+
     // Enviar mensagem para o webhook do Make com retry
     let retries = 3;
     while (retries > 0) {
       try {
+        const cleanedData = cleanAndParseJSON(webhookData);
         const response = await fetch(WEBHOOK_URL, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            number: senderNumber,
-            conversationId: conversationId,
-            message: text,
-            name: senderName,
-          }),
+          body: JSON.stringify(cleanedData),
           timeout: FETCH_TIMEOUT,
         });
         if (response.ok) {
@@ -133,12 +189,11 @@ const connectToWhatsApp = async (retryCount = 0) => {
     if (connection === 'open') {
       console.log('Conectado ao WhatsApp com sucesso!');
       global.client = sock;
-      retryCount = 0; // Resetar contagem de tentativas
+      retryCount = 0;
     }
     if (connection === 'close') {
       const reason = lastDisconnect?.error?.message || 'Motivo desconhecido';
       console.log(`Desconectado! Motivo: ${reason}. Reconectando...`);
-      // Backoff exponencial: 5s, 10s, 20s, etc.
       const delay = Math.min(5_000 * Math.pow(2, retryCount), 60_000);
       setTimeout(() => connectToWhatsApp(retryCount + 1), delay);
     }
@@ -164,7 +219,7 @@ const keepAlive = async () => {
     clearTimeout(timeoutId);
     const text = await response.text();
     console.log(`Keep-alive ping: ${text}`);
-    keepAliveFailures = 0; // Resetar contagem de falhas
+    keepAliveFailures = 0;
   } catch (error) {
     console.error('Erro ao fazer keep-alive ping:', error);
     keepAliveFailures++;
