@@ -19,7 +19,7 @@ app.use((req, res, next) => {
     // Para a rota /send, vamos ler o corpo como texto bruto
     return next();
   }
-  express.json()(req, res, next);
+  return express.json()(req, res, next); // Corrigido: Adicionado return e removido qualquer parêntese extra
 });
 
 // Função para limpar e corrigir JSON
@@ -60,7 +60,7 @@ const cleanAndParseJSON = (data) => {
     console.error('Erro ao limpar e parsear JSON:', error);
     throw new Error(`Falha ao processar JSON: ${error.message}`);
   }
-});
+};
 
 // Rota para enviar mensagem (POST)
 app.post('/send', async (req, res) => {
