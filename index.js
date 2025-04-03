@@ -12,6 +12,11 @@ const port = process.env.PORT || 3000;
 const WEBHOOK_URL = process.env.WEBHOOK_URL || 'https://hook.us1.make.com/crkwif3h4cdyvfx7anf4ltla2831r6pr';
 const KEEP_ALIVE_INTERVAL = 14 * 60 * 1000; // 14 minutos
 const FETCH_TIMEOUT = 10_000; // 10 segundos
+const MESSAGE_TIMEOUT = 30 * 60 * 1000; // 30 minutos em milissegundos
+const CLEANUP_INTERVAL = 5 * 60 * 1000; // 5 minutos em milissegundos
+
+// Armazenamento em memória dos números liberados
+const allowedSenders = new Map(); // { "5575992017552": { lastMessageTime: timestamp } }
 
 // Middleware pra parsear JSON em rotas que não sejam /send
 app.use((req, res, next) => {
@@ -19,7 +24,7 @@ app.use((req, res, next) => {
     // Para a rota /send, vamos ler o corpo como texto bruto
     return next();
   }
-  return express.json()(req, res, next); // Corrigido: Adicionado return e removido qualquer parêntese extra
+  return express.json()(req, res, next);
 });
 
 // Função para limpar e corrigir JSON
@@ -150,8 +155,31 @@ const connectToWhatsApp = async (retryCount = 0) => {
     const conversationId = msg.key.id;
     const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
     const senderName = msg.pushName || senderNumber;
+    const currentTime = Date.now();
 
     console.log(`Mensagem recebida de ${senderName} (${senderNumber}) - ID da conversa: ${conversationId}: ${text}`);
+
+    // Verificar se o remetente já está liberado
+    const senderData = allowedSenders.get(senderNumber);
+    const isAllowed = senderData && (currentTime - senderData.lastMessageTime) < MESSAGE_TIMEOUT;
+
+    // Verificar se a mensagem contém "Dr. Manoel" ou variações (case-insensitive)
+    const drManoelRegex = /dr\.?\s*manoel/i; // Aceita "dr manoel", "dr. manoel", "DR MANOEL", etc.
+    const containsDrManoel = drManoelRegex.test(text);
+
+    // Se o remetente não está liberado e a mensagem não contém "Dr. Manoel", ignorar
+    if (!isAllowed && !containsDrManoel) {
+      console.log(`Mensagem ignorada: remetente ${senderNumber} não está liberado e mensagem não contém "Dr. Manoel".`);
+      return;
+    }
+
+    // Se a mensagem contém "Dr. Manoel", liberar o remetente
+    if (containsDrManoel) {
+      console.log(`Remetente ${senderNumber} liberado por mencionar "Dr. Manoel".`);
+    }
+
+    // Atualizar o timestamp do remetente
+    allowedSenders.set(senderNumber, { lastMessageTime: currentTime });
 
     // Preparar os dados pra enviar pro webhook
     const webhookData = {
@@ -166,7 +194,7 @@ const connectToWhatsApp = async (retryCount = 0) => {
     while (retries > 0) {
       try {
         const cleanedData = cleanAndParseJSON(webhookData);
-        const response = await fetch(WEBHOOK_URL, {
+        const response = await fetch(WEBHOOk_URL, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(cleanedData),
@@ -218,6 +246,20 @@ app.listen(port, '0.0.0.0', () => {
 
 // Conecta ao WhatsApp
 connectToWhatsApp();
+
+// Função para limpar remetentes expirados
+const cleanupExpiredSenders = () => {
+  const currentTime = Date.now();
+  for (const [senderNumber, data] of allowedSenders.entries()) {
+    if ((currentTime - data.lastMessageTime) >= MESSAGE_TIMEOUT) {
+      console.log(`Remetente ${senderNumber} removido da lista de liberados: última mensagem foi há mais de 30 minutos.`);
+      allowedSenders.delete(senderNumber);
+    }
+  }
+};
+
+// Executa a limpeza a cada 5 minutos
+setInterval(cleanupExpiredSenders, CLEANUP_INTERVAL);
 
 // Função para "pingar" a si mesmo a cada 14 minutos
 let keepAliveFailures = 0;
