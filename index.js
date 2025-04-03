@@ -194,7 +194,7 @@ const connectToWhatsApp = async (retryCount = 0) => {
     while (retries > 0) {
       try {
         const cleanedData = cleanAndParseJSON(webhookData);
-        const response = await fetch(WEBHOOk_URL, {
+        const response = await fetch(WEBHOOK_URL, { // Corrigido: WEBHOOk_URL -> WEBHOOK_URL
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(cleanedData),
