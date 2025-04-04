@@ -9,7 +9,7 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 // Configurações
-const WEBHOOK_URL = process.env.WEBHOOK_URL || 'https://hook.us1.make.com/crkwif3h4cdyvfx7anf4ltla2831r6pr';
+const WEBHOOK_URL = process.env.WEBHOOK_URL || 'https://hook.us1.make.com/klvxaodjlahgxvi3div6uoyqrny89sfs';
 const KEEP_ALIVE_INTERVAL = 14 * 60 * 1000; // 14 minutos
 const FETCH_TIMEOUT = 10_000; // 10 segundos
 const MESSAGE_TIMEOUT = 30 * 60 * 1000; // 30 minutos em milissegundos
@@ -164,18 +164,18 @@ const connectToWhatsApp = async (retryCount = 0) => {
     const isAllowed = senderData && (currentTime - senderData.lastMessageTime) < MESSAGE_TIMEOUT;
 
     // Verificar se a mensagem contém "Dr. Manoel" ou variações (case-insensitive)
-    const drManoelRegex = /dr\.?\s*manoel/i; // Aceita "dr manoel", "dr. manoel", "DR MANOEL", etc.
+    const drManoelRegex = /dr\.?\s*eliah/i; // Aceita "dr eliah", "dr. eliah", "DR ELIAH", etc.
     const containsDrManoel = drManoelRegex.test(text);
 
     // Se o remetente não está liberado e a mensagem não contém "Dr. Manoel", ignorar
     if (!isAllowed && !containsDrManoel) {
-      console.log(`Mensagem ignorada: remetente ${senderNumber} não está liberado e mensagem não contém "Dr. Manoel".`);
+      console.log(`Mensagem ignorada: remetente ${senderNumber} não está liberado e mensagem não contém "Dr. Eliah".`);
       return;
     }
 
     // Se a mensagem contém "Dr. Manoel", liberar o remetente
     if (containsDrManoel) {
-      console.log(`Remetente ${senderNumber} liberado por mencionar "Dr. Manoel".`);
+      console.log(`Remetente ${senderNumber} liberado por mencionar "Dr. Eliah".`);
     }
 
     // Atualizar o timestamp do remetente
