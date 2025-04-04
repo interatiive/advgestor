@@ -9,11 +9,17 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 // Configurações
-const WEBHOOK_URL = process.env.WEBHOOK_URL || 'https://hook.us1.make.com/klvxaodjlahgxvi3div6uoyqrny89sfs';
+const WEBHOOK_URL = process.env.WEBHOOK_URL; // Removido o valor padrão
 const KEEP_ALIVE_INTERVAL = 14 * 60 * 1000; // 14 minutos
 const FETCH_TIMEOUT = 10_000; // 10 segundos
 const MESSAGE_TIMEOUT = 30 * 60 * 1000; // 30 minutos em milissegundos
 const CLEANUP_INTERVAL = 5 * 60 * 1000; // 5 minutos em milissegundos
+
+// Verificar se o WEBHOOK_URL está definido
+if (!WEBHOOK_URL) {
+  console.error('Erro: A variável de ambiente WEBHOOK_URL não está definida. Configure-a no Render.');
+  process.exit(1); // Encerra o processo se a variável não estiver definida
+}
 
 // Armazenamento em memória dos números liberados
 const allowedSenders = new Map(); // { "5575992017552": { lastMessageTime: timestamp } }
