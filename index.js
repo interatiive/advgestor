@@ -163,18 +163,18 @@ const connectToWhatsApp = async (retryCount = 0) => {
     const senderData = allowedSenders.get(senderNumber);
     const isAllowed = senderData && (currentTime - senderData.lastMessageTime) < MESSAGE_TIMEOUT;
 
-    // Verificar se a mensagem contém "Dr. Manoel" ou variações (case-insensitive)
-    const drManoelRegex = /dr\.?\s*eliah/i; // Aceita "dr eliah", "dr. eliah", "DR ELIAH", etc.
-    const containsDrManoel = drManoelRegex.test(text);
+    // Verificar se a mensagem contém "Dr. Eliah" ou variações (case-insensitive)
+    const drEliahRegex = /dr\.?\s*eliah/i; // Aceita "dr eliah", "dr. eliah", "DR ELIAH", etc.
+    const containsDrEliah = drEliahRegex.test(text);
 
-    // Se o remetente não está liberado e a mensagem não contém "Dr. Manoel", ignorar
-    if (!isAllowed && !containsDrManoel) {
+    // Se o remetente não está liberado e a mensagem não contém "Dr. Eliah", ignorar
+    if (!isAllowed && !containsDrEliah) {
       console.log(`Mensagem ignorada: remetente ${senderNumber} não está liberado e mensagem não contém "Dr. Eliah".`);
       return;
     }
 
-    // Se a mensagem contém "Dr. Manoel", liberar o remetente
-    if (containsDrManoel) {
+    // Se a mensagem contém "Dr. Eliah", liberar o remetente
+    if (containsDrEliah) {
       console.log(`Remetente ${senderNumber} liberado por mencionar "Dr. Eliah".`);
     }
 
@@ -194,7 +194,7 @@ const connectToWhatsApp = async (retryCount = 0) => {
     while (retries > 0) {
       try {
         const cleanedData = cleanAndParseJSON(webhookData);
-        const response = await fetch(WEBHOOK_URL, { // Corrigido: WEBHOOk_URL -> WEBHOOK_URL
+        const response = await fetch(WEBHOOK_URL, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(cleanedData),
