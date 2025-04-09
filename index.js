@@ -9,25 +9,27 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 // Configurações
-const WEBHOOK_URL = process.env.WEBHOOK_URL; // Removido o valor padrão
+const WEBHOOK_URL = process.env.WEBHOOK_URL;
 const KEEP_ALIVE_INTERVAL = 14 * 60 * 1000; // 14 minutos
 const FETCH_TIMEOUT = 10_000; // 10 segundos
 const MESSAGE_TIMEOUT = 30 * 60 * 1000; // 30 minutos em milissegundos
 const CLEANUP_INTERVAL = 5 * 60 * 1000; // 5 minutos em milissegundos
+const MIN_DELAY = 25_000; // 25 segundos em milissegundos
+const MAX_DELAY = 30_000; // 30 segundos em milissegundos
+const MAX_MESSAGES_PER_REQUEST = 50; // Limite máximo de mensagens por requisição
 
 // Verificar se o WEBHOOK_URL está definido
 if (!WEBHOOK_URL) {
   console.error('Erro: A variável de ambiente WEBHOOK_URL não está definida. Configure-a no Render.');
-  process.exit(1); // Encerra o processo se a variável não estiver definida
+  process.exit(1);
 }
 
 // Armazenamento em memória dos números liberados
-const allowedSenders = new Map(); // { "5575992017552": { lastMessageTime: timestamp } }
+const allowedSenders = new Map();
 
 // Middleware pra parsear JSON em rotas que não sejam /send
 app.use((req, res, next) => {
   if (req.path === '/send' && req.method === 'POST') {
-    // Para a rota /send, vamos ler o corpo como texto bruto
     return next();
   }
   return express.json()(req, res, next);
@@ -36,85 +38,100 @@ app.use((req, res, next) => {
 // Função para limpar e corrigir JSON
 const cleanAndParseJSON = (data) => {
   try {
-    // Se já for um objeto, não precisa processar
     if (typeof data === 'object' && data !== null) {
       return data;
     }
-
-    // Converter pra string, caso não seja
     let jsonString = typeof data === 'string' ? data : JSON.stringify(data);
-
-    // Remover tudo antes do primeiro { e depois do último }
     const firstBrace = jsonString.indexOf('{');
     const lastBrace = jsonString.lastIndexOf('}');
     if (firstBrace === -1 || lastBrace === -1 || firstBrace > lastBrace) {
       throw new Error('JSON inválido: não contém chaves {}');
     }
-    jsonString = jsonString.substring(firstBrace, lastBrace + 1);
-
-    // Remover espaços desnecessários no início e fim
-    jsonString = jsonString.trim();
-
-    // Tentar corrigir aspas inválidas (ex.: ' por ")
-    jsonString = jsonString.replace(/'/g, '"');
-
-    // Parsear o JSON
-    const parsed = JSON.parse(jsonString);
-
-    // Garantir que as quebras de linha no campo "message" sejam preservadas
-    if (parsed.message && typeof parsed.message === 'string') {
-      parsed.message = parsed.message.replace(/\\n/g, '\n');
-    }
-
-    return parsed;
+    jsonString = jsonString.substring(firstBrace, lastBrace + 1).trim().replace(/'/g, '"');
+    return JSON.parse(jsonString);
   } catch (error) {
     console.error('Erro ao limpar e parsear JSON:', error);
-    throw new Error(`Falha ao processar JSON: ${error.message}`);
+    throw error;
   }
 };
 
-// Rota para enviar mensagem (POST)
+// Função para enviar mensagem com delay
+const sendMessageWithDelay = async ({ telefone, message }, delay) => {
+  return new Promise((resolve) => {
+    setTimeout(async () => {
+      const cleanNumber = telefone.toString().replace(/[^0-9]/g, '');
+      try {
+        const [result] = await global.client.onWhatsApp(`${cleanNumber}@s.whatsapp.net`);
+        if (!result || !result.exists) {
+          console.log(`Número ${cleanNumber} não está registrado no WhatsApp`);
+          resolve({ success: false, number: cleanNumber, error: 'Número não registrado no WhatsApp' });
+          return;
+        }
+        const sentMessage = await global.client.sendMessage(`${cleanNumber}@s.whatsapp.net`, { text: message, linkPreview: false }, { timeout: 60_000 });
+        console.log(`Mensagem enviada com sucesso para: ${cleanNumber}`, sentMessage);
+        resolve({ success: true, number: cleanNumber });
+      } catch (error) {
+        console.error(`Erro ao enviar mensagem para ${cleanNumber}:`, error);
+        resolve({ success: false, number: cleanNumber, error: error.message });
+      }
+    }, delay);
+  });
+};
+
+// Rota para enviar mensagens (POST)
 app.post('/send', async (req, res) => {
-  // Ler o corpo da requisição como texto bruto
   let rawBody = '';
   req.setEncoding('utf8');
-  req.on('data', chunk => {
-    rawBody += chunk;
-  });
+  req.on('data', chunk => rawBody += chunk);
 
   req.on('end', async () => {
     try {
-      // Limpar e parsear o JSON
+      // Parsear o corpo bruto
       const body = cleanAndParseJSON(rawBody);
 
-      const { number, message } = body;
-
-      // Validação de entrada
-      if (!number || !message) {
-        return res.status(400).json({ success: false, error: 'Número e mensagem são obrigatórios' });
+      // Verificar se "dados" existe e parsear o JSON interno
+      if (!body.dados) {
+        console.error('Requisição inválida: campo "dados" não encontrado');
+        return res.status(400).send();
       }
 
-      // Limpar o número (remover +, espaços, traços, etc.)
-      const cleanNumber = number.toString().replace(/[^0-9]/g, '');
-      if (!cleanNumber || cleanNumber.length < 10) {
-        return res.status(400).json({ success: false, error: 'Número de telefone inválido' });
+      const dadosParsed = cleanAndParseJSON(body.dados);
+      if (!dadosParsed.messages || !Array.isArray(dadosParsed.messages)) {
+        console.error('Requisição inválida: "messages" deve ser uma lista dentro de "dados"');
+        return res.status(400).send();
       }
 
-      console.log(`Requisição POST recebida na rota /send: { number: ${cleanNumber}, message: ${message} }`);
-      try {
-        await global.client.sendMessage(`${cleanNumber}@s.whatsapp.net`, { text: message, linkPreview: false }, { timeout: 60_000 });
-        console.log(`Mensagem enviada com sucesso para: ${cleanNumber}`);
-        res.json({ success: true, message: `Mensagem enviada pra ${cleanNumber}` });
-      } catch (error) {
-        console.error('Erro ao enviar mensagem:', error);
-        if (error.message && error.message.includes('timed out')) {
-          res.status(408).json({ success: false, error: 'Timeout ao enviar mensagem' });
-        } else {
-          res.status(500).json({ success: false, error: 'Erro ao enviar mensagem' });
+      const messages = dadosParsed.messages;
+      if (messages.length > MAX_MESSAGES_PER_REQUEST) {
+        console.error(`Número de mensagens (${messages.length}) excede o limite de ${MAX_MESSAGES_PER_REQUEST}`);
+        return res.status(400).send();
+      }
+
+      console.log(`Requisição POST recebida com ${messages.length} mensagens para envio programado`);
+
+      // Programar envio de cada mensagem com delay
+      const sendPromises = [];
+      let currentDelay = 0;
+      for (const msg of messages) {
+        const { telefone, message } = msg;
+        if (!telefone || !message) {
+          console.log(`Mensagem inválida ignorada: ${JSON.stringify(msg)}`);
+          continue;
         }
+        const delay = currentDelay + Math.floor(Math.random() * (MAX_DELAY - MIN_DELAY + 1)) + MIN_DELAY;
+        sendPromises.push(sendMessageWithDelay({ telefone, message }, delay));
+        currentDelay = delay;
       }
+
+      // Responder com status 200 sem corpo
+      res.status(200).send();
+
+      // Executar os envios em segundo plano e logar os resultados
+      const results = await Promise.all(sendPromises);
+      console.log('Resultado do envio em massa:', results);
     } catch (error) {
-      res.status(400).json({ success: false, error: error.message });
+      console.error('Erro ao processar requisição /send:', error);
+      res.status(500).send();
     }
   });
 });
@@ -136,27 +153,22 @@ const connectToWhatsApp = async (retryCount = 0) => {
     defaultQueryTimeoutMs: 60_000,
   });
 
-  // Evento para salvar credenciais
   sock.ev.on('creds.update', saveCreds);
 
-  // Evento para monitorar mensagens recebidas
   sock.ev.on('messages.upsert', async ({ messages }) => {
     console.log('Nova mensagem recebida:', messages);
 
     const msg = messages[0];
     if (!msg || !msg.message) return;
 
-    // Ignorar mensagens de grupo (se desejado)
     if (msg.key.remoteJid.endsWith('@g.us')) {
       console.log('Mensagem de grupo ignorada:', msg.key.remoteJid);
       return;
     }
 
-    // Verificar se é uma mensagem de texto
     const messageType = Object.keys(msg.message)[0];
     if (messageType !== 'conversation' && messageType !== 'extendedTextMessage') return;
 
-    // Extrair informações
     const senderNumber = msg.key.remoteJid.split('@')[0];
     const conversationId = msg.key.id;
     const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
@@ -165,29 +177,22 @@ const connectToWhatsApp = async (retryCount = 0) => {
 
     console.log(`Mensagem recebida de ${senderName} (${senderNumber}) - ID da conversa: ${conversationId}: ${text}`);
 
-    // Verificar se o remetente já está liberado
     const senderData = allowedSenders.get(senderNumber);
     const isAllowed = senderData && (currentTime - senderData.lastMessageTime) < MESSAGE_TIMEOUT;
-
-    // Verificar se a mensagem contém "Dr. Eliah" ou variações (case-insensitive)
-    const drEliahRegex = /dr\.?\s*eliah/i; // Aceita "dr eliah", "dr. eliah", "DR ELIAH", etc.
+    const drEliahRegex = /dr\.?\s*eliah/i;
     const containsDrEliah = drEliahRegex.test(text);
 
-    // Se o remetente não está liberado e a mensagem não contém "Dr. Eliah", ignorar
     if (!isAllowed && !containsDrEliah) {
       console.log(`Mensagem ignorada: remetente ${senderNumber} não está liberado e mensagem não contém "Dr. Eliah".`);
       return;
     }
 
-    // Se a mensagem contém "Dr. Eliah", liberar o remetente
     if (containsDrEliah) {
       console.log(`Remetente ${senderNumber} liberado por mencionar "Dr. Eliah".`);
     }
 
-    // Atualizar o timestamp do remetente
     allowedSenders.set(senderNumber, { lastMessageTime: currentTime });
 
-    // Preparar os dados pra enviar pro webhook
     const webhookData = {
       number: senderNumber,
       conversationId: conversationId,
@@ -195,7 +200,6 @@ const connectToWhatsApp = async (retryCount = 0) => {
       name: senderName,
     };
 
-    // Enviar mensagem para o webhook do Make com retry
     let retries = 3;
     while (retries > 0) {
       try {
@@ -218,13 +222,12 @@ const connectToWhatsApp = async (retryCount = 0) => {
         if (retries === 0) {
           console.error('Falha ao enviar mensagem para o webhook após 3 tentativas');
         } else {
-          await new Promise(resolve => setTimeout(resolve, 2000 * (3 - retries))); // Backoff exponencial
+          await new Promise(resolve => setTimeout(resolve, 2000 * (3 - retries)));
         }
       }
     }
   });
 
-  // Evento de atualização de conexão
   sock.ev.on('connection.update', (update) => {
     const { connection, qr, lastDisconnect } = update;
     if (qr) {
@@ -264,10 +267,9 @@ const cleanupExpiredSenders = () => {
   }
 };
 
-// Executa a limpeza a cada 5 minutos
 setInterval(cleanupExpiredSenders, CLEANUP_INTERVAL);
 
-// Função para "pingar" a si mesmo a cada 14 minutos
+// Função para "pingar" a si mesmo
 let keepAliveFailures = 0;
 const keepAlive = async () => {
   const url = 'https://whatsapp-api-render-pqn2.onrender.com/ping';
@@ -288,5 +290,4 @@ const keepAlive = async () => {
   }
 };
 
-// Executa o ping a cada 14 minutos
 setInterval(keepAlive, KEEP_ALIVE_INTERVAL);
