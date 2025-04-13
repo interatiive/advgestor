@@ -10,7 +10,9 @@
     "@whiskeysockets/baileys": "^6.7.5",
     "express": "^4.18.2",
     "pino": "^8.20.0",
-    "qrcode-terminal": "^0.12.0",
-    "node-fetch": "^2.7.0"
+    "node-fetch": "^2.7.0",
+    "axios": "^1.6.0",
+    "cheerio": "^1.0.0-rc.12",
+    "node-cron": "^3.0.3"
   }
 }
