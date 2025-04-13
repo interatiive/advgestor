@@ -1,9 +1,11 @@
 const express = require('express');
-const qrcode = require('qrcode-terminal');
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const fetch = require('node-fetch');
 const fs = require('fs').promises;
 const path = require('path');
+const axios = require('axios'); // Adicionado pra Jusbrasil
+const cheerio = require('cheerio'); // Adicionado pra Jusbrasil
+const cron = require('node-cron'); // Adicionado pra agendamento do Jusbrasil
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -21,6 +23,12 @@ const MAX_MESSAGES_PER_REQUEST = 50; // Limite máximo de mensagens por requisi�
 // Verificar se o WEBHOOK_URL está definido
 if (!WEBHOOK_URL) {
   console.error('Erro: A variável de ambiente WEBHOOK_URL não está definida. Configure-a no Render.');
+  process.exit(1);
+}
+
+// Verificar se LAWYER_NAME está definido (pra Jusbrasil)
+if (!process.env.LAWYER_NAME) {
+  console.error('Erro: A variável de ambiente LAWYER_NAME não está definida. Configure-a no Render.');
   process.exit(1);
 }
 
@@ -77,6 +85,35 @@ const sendMessageWithDelay = async ({ telefone, message }, delay) => {
     }, delay);
   });
 };
+
+// Função para enviar dados pro Make (usada por "Dr. Eliah" e Jusbrasil)
+async function sendToMake(data) {
+  let retries = 3;
+  while (retries > 0) {
+    try {
+      const response = await fetch(WEBHOOK_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+        timeout: FETCH_TIMEOUT,
+      });
+      if (response.ok) {
+        console.log('Dados enviados pro Make com sucesso:', data);
+        break;
+      } else {
+        throw new Error(`Webhook respondeu com status ${response.status}`);
+      }
+    } catch (error) {
+      retries--;
+      console.error(`Erro ao enviar pro Make (tentativa ${4 - retries}/3):`, error);
+      if (retries === 0) {
+        console.error('Falha ao enviar pro Make após 3 tentativas');
+      } else {
+        await new Promise(resolve => setTimeout(resolve, 2000 * (3 - retries)));
+      }
+    }
+  }
+}
 
 // Rota para enviar mensagens (POST)
 app.post('/send', async (req, res) => {
@@ -200,39 +237,14 @@ const connectToWhatsApp = async (retryCount = 0) => {
       name: senderName,
     };
 
-    let retries = 3;
-    while (retries > 0) {
-      try {
-        const cleanedData = cleanAndParseJSON(webhookData);
-        const response = await fetch(WEBHOOK_URL, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(cleanedData),
-          timeout: FETCH_TIMEOUT,
-        });
-        if (response.ok) {
-          console.log('Mensagem enviada para o webhook do Make com sucesso!');
-          break;
-        } else {
-          throw new Error(`Webhook respondeu com status ${response.status}`);
-        }
-      } catch (error) {
-        retries--;
-        console.error(`Erro ao enviar mensagem para o webhook do Make (tentativa ${4 - retries}/3):`, error);
-        if (retries === 0) {
-          console.error('Falha ao enviar mensagem para o webhook após 3 tentativas');
-        } else {
-          await new Promise(resolve => setTimeout(resolve, 2000 * (3 - retries)));
-        }
-      }
-    }
+    await sendToMake(webhookData);
   });
 
   sock.ev.on('connection.update', (update) => {
     const { connection, qr, lastDisconnect } = update;
     if (qr) {
-      console.log('QR Code (texto):', qr);
-      qrcode.generate(qr, { small: true });
+      const qrLink = `https://api.qrserver.com/v1/create-qr-code/?data=${encodeURIComponent(qr)}`;
+      console.log('Link do QR Code (clique para visualizar):', qrLink);
     }
     if (connection === 'open') {
       console.log('Conectado ao WhatsApp com sucesso!');
@@ -248,6 +260,162 @@ const connectToWhatsApp = async (retryCount = 0) => {
   });
 };
 
+// --- Código do Jusbrasil ---
+
+// Função pra formatar a data atual no formato do Jusbrasil (ex.: "14/04/2025" e "14/04/25")
+function getCurrentDateFormats() {
+  const today = new Date();
+  const day = String(today.getDate()).padStart(2, '0');
+  const month = String(today.getMonth() + 1).padStart(2, '0');
+  const year = today.getFullYear();
+  const shortYear = String(year).slice(-2);
+  return {
+    full: `${day}/${month}/${year}`, // Ex.: "14/04/2025"
+    short: `${day}/${month}/${shortYear}` // Ex.: "14/04/25"
+  };
+}
+
+// Função pra construir o link de busca no Jusbrasil
+function buildSearchUrl() {
+  const lawyerName = process.env.LAWYER_NAME;
+  const { full, short } = getCurrentDateFormats();
+  const query = `"${encodeURIComponent(lawyerName)}" AND ("${encodeURIComponent(full)}" OR "${encodeURIComponent(short)}")`;
+  return `https://www.jusbrasil.com.br/diarios/busca?q=${query}&o=data`;
+}
+
+// Função pra verificar se a data no título corresponde ao dia atual
+function isCurrentDateInTitle(title) {
+  const { full, short } = getCurrentDateFormats();
+  return title.includes(full) || title.includes(short);
+}
+
+// Função pra extrair dados de um link do Jusbrasil
+async function extractDataFromLink(link) {
+  try {
+    const response = await axios.get(link);
+    const $ = cheerio.load(response.data);
+
+    // Extrair número do processo (ex.: "12345-67.2023.8.05.0001")
+    let processNumber = '';
+    const processText = $('body').text().match(/\d{5}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}/);
+    if (processText) {
+      processNumber = processText[0];
+    }
+
+    // Extrair vara e comarca (ex.: "2ª Vara Cível – Salvador/BA")
+    let court = '';
+    let jurisdiction = '';
+    const courtText = $('body').text().match(/(\d{1,2}ª?\s*Vara\s*\w*)\s*–\s*(\w+\/\w+)/);
+    if (courtText) {
+      court = courtText[1].trim();
+      jurisdiction = courtText[2].trim();
+    }
+
+    // Extrair data (data atual, já que é do dia)
+    const date = getCurrentDateFormats().full;
+
+    // Extrair OAB (ex.: "34609")
+    let oab = '';
+    const oabText = $('body').text().match(/OAB.*?\d{5}/);
+    if (oabText) {
+      oab = oabText[0].match(/\d{5}/)[0];
+    }
+
+    // Se o link não tiver os dados, tenta o trecho (snippet) do resultado
+    if (!processNumber || !court || !jurisdiction) {
+      const snippet = $('meta[name="description"]').attr('content') || '';
+      const snippetProcess = snippet.match(/\d{5}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}/);
+      if (snippetProcess) processNumber = snippetProcess[0];
+      const snippetCourt = snippet.match(/(\d{1,2}ª?\s*Vara\s*\w*)\s*–\s*(\w+\/\w+)/);
+      if (snippetCourt) {
+        court = snippetCourt[1].trim();
+        jurisdiction = snippetCourt[2].trim();
+      }
+    }
+
+    return {
+      oab: oab || '',
+      processNumber: processNumber || '',
+      date: date,
+      court: court || '',
+      jurisdiction: jurisdiction || ''
+    };
+  } catch (error) {
+    console.error(`Erro ao acessar link ${link}: ${error.message}`);
+    return {
+      oab: '',
+      processNumber: '',
+      date: getCurrentDateFormats().full,
+      court: '',
+      jurisdiction: ''
+    };
+  }
+}
+
+// Função principal pra buscar resultados e processar (Jusbrasil)
+async function checkJusbrasil() {
+  try {
+    const url = buildSearchUrl();
+    let page = 1;
+    let hasResultsForToday = false;
+    const linksToProcess = [];
+
+    while (true) {
+      const pageUrl = `${url}&page=${page}`;
+      const response = await axios.get(pageUrl);
+      const $ = cheerio.load(response.data);
+
+      const results = $('.search-result');
+      if (results.length === 0) break;
+
+      for (let i = 0; i < results.length; i++) {
+        const title = $(results[i]).find('.search-result__title').text();
+        if (isCurrentDateInTitle(title)) {
+          hasResultsForToday = true;
+          const link = $(results[i]).find('a').attr('href');
+          if (link) linksToProcess.push(link);
+        } else {
+          return { stop: true, links: linksToProcess };
+        }
+      }
+
+      if (!hasResultsForToday) {
+        page++;
+      } else {
+        break;
+      }
+    }
+
+    return { stop: hasResultsForToday, links: linksToProcess };
+  } catch (error) {
+    console.error(`Erro ao buscar resultados: ${error.message}`);
+    return { stop: false, links: [] };
+  }
+}
+
+// Função pra rodar a busca no Jusbrasil a cada 20 minutos entre 9h e 18h
+function startJusbrasilCheck() {
+  cron.schedule('*/20 9-18 * * *', async () => {
+    const now = new Date();
+    console.log(`[Jusbrasil] Verificando resultados às ${now.toISOString()}`);
+
+    const { stop, links } = await checkJusbrasil();
+
+    if (stop && links.length > 0) {
+      console.log(`[Jusbrasil] Encontrados ${links.length} resultados do dia. Processando...`);
+      for (const link of links) {
+        const data = await extractDataFromLink(link);
+        await sendToMake(data);
+      }
+      console.log('[Jusbrasil] Processamento concluído. Parando até amanhã às 9h.');
+    } else if (stop) {
+      console.log('[Jusbrasil] Nenhum resultado encontrado, mas data anterior detectada. Parando até amanhã às 9h.');
+    } else {
+      console.log('[Jusbrasil] Nenhum resultado do dia encontrado. Continuando a busca em 20 minutos.');
+    }
+  });
+}
+
 // Inicia o servidor
 app.listen(port, '0.0.0.0', () => {
   console.log(`Servidor rodando na porta ${port}`);
@@ -255,6 +423,10 @@ app.listen(port, '0.0.0.0', () => {
 
 // Conecta ao WhatsApp
 connectToWhatsApp();
+
+// Inicia a busca no Jusbrasil
+startJusbrasilCheck();
+console.log('[Jusbrasil] Script iniciado. Aguardando 9h pra começar a busca.');
 
 // Função para limpar remetentes expirados
 const cleanupExpiredSenders = () => {
