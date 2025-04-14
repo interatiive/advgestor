@@ -267,6 +267,42 @@ const connectToWhatsApp = async (retryCount = 0) => {
 
 // --- Código do Jusbrasil ---
 
+// Função auxiliar para adicionar um atraso
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Função para obter cookies da página inicial
+async function getInitialCookies() {
+    try {
+        const response = await axios.get('https://www.jusbrasil.com.br/diarios', {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+                'Accept-Encoding': 'gzip, deflate, br, zstd',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+                'Sec-Fetch-User': '?1',
+            },
+            timeout: 10000,
+        });
+
+        // Extrair cookies do header 'set-cookie'
+        const cookies = response.headers['set-cookie'];
+        if (cookies) {
+            const cookieString = cookies.map(cookie => cookie.split(';')[0]).join('; ');
+            console.log('Cookies obtidos:', cookieString);
+            return cookieString;
+        }
+        return '';
+    } catch (error) {
+        console.error('Erro ao obter cookies iniciais:', error.message);
+        return '';
+    }
+}
+
 // Função pra formatar a data atual no formato do Jusbrasil (ex.: "14/04/2025")
 function getCurrentDateFormats() {
   const today = new Date();
@@ -294,122 +330,148 @@ function isCurrentDateInTitle(title) {
 
 // Função pra extrair dados de um link do Jusbrasil
 async function extractDataFromLink(link) {
-  try {
-    const response = await axios.get(link, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Connection': 'keep-alive',
-      },
-      timeout: 10000,
-    });
-    const $ = cheerio.load(response.data);
+    try {
+        // Reutilizar os cookies da sessão inicial
+        const cookies = await getInitialCookies();
+        await delay(3000); // Simula um humano clicando no link
 
-    // Extrair número do processo (ex.: "12345-67.2023.8.05.0001")
-    let processNumber = '';
-    const processText = $('body').text().match(/\d{5}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}/);
-    if (processText) {
-      processNumber = processText[0];
+        const response = await axios.get(link, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+                'Accept-Encoding': 'gzip, deflate, br, zstd',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'same-origin',
+                'Sec-Fetch-User': '?1',
+                'Referer': 'https://www.jusbrasil.com.br/diarios/busca?q=' + encodeURIComponent(`"${process.env.LAWYER_NAME}" "${getCurrentDateFormats().full}"`) + '&o=data',
+                'Cookie': cookies,
+            },
+            timeout: 10000,
+        });
+        const $ = cheerio.load(response.data);
+
+        // Extrair número do processo (ex.: "12345-67.2023.8.05.0001")
+        let processNumber = '';
+        const processText = $('body').text().match(/\d{5}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}/);
+        if (processText) {
+            processNumber = processText[0];
+        }
+
+        // Extrair vara e comarca (ex.: "2ª Vara Cível – Salvador/BA")
+        let court = '';
+        let jurisdiction = '';
+        const courtText = $('body').text().match(/(\d{1,2}ª?\s*Vara\s*\w*)\s*–\s*(\w+\/\w+)/);
+        if (courtText) {
+            court = courtText[1].trim();
+            jurisdiction = courtText[2].trim();
+        }
+
+        // Extrair data (data atual, já que é do dia)
+        const date = getCurrentDateFormats().full;
+
+        // Extrair OAB (ex.: "34609")
+        let oab = '';
+        const oabText = $('body').text().match(/OAB.*?\d{5}/);
+        if (oabText) {
+            oab = oabText[0].match(/\d{5}/)[0];
+        }
+
+        // Se o link não tiver os dados, tenta o trecho (snippet) do resultado
+        if (!processNumber || !court || !jurisdiction) {
+            const snippet = $('meta[name="description"]').attr('content') || '';
+            const snippetProcess = snippet.match(/\d{5}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}/);
+            if (snippetProcess) processNumber = snippetProcess[0];
+            const snippetCourt = snippet.match(/(\d{1,2}ª?\s*Vara\s*\w*)\s*–\s*(\w+\/\w+)/);
+            if (snippetCourt) {
+                court = snippetCourt[1].trim();
+                jurisdiction = snippetCourt[2].trim();
+            }
+        }
+
+        return {
+            oab: oab || '',
+            processNumber: processNumber || '',
+            date: date,
+            court: court || '',
+            jurisdiction: jurisdiction || ''
+        };
+    } catch (error) {
+        console.error(`Erro ao acessar link ${link}: ${error.message}`);
+        return {
+            oab: '',
+            processNumber: '',
+            date: getCurrentDateFormats().full,
+            court: '',
+            jurisdiction: ''
+        };
     }
-
-    // Extrair vara e comarca (ex.: "2ª Vara Cível – Salvador/BA")
-    let court = '';
-    let jurisdiction = '';
-    const courtText = $('body').text().match(/(\d{1,2}ª?\s*Vara\s*\w*)\s*–\s*(\w+\/\w+)/);
-    if (courtText) {
-      court = courtText[1].trim();
-      jurisdiction = courtText[2].trim();
-    }
-
-    // Extrair data (data atual, já que é do dia)
-    const date = getCurrentDateFormats().full;
-
-    // Extrair OAB (ex.: "34609")
-    let oab = '';
-    const oabText = $('body').text().match(/OAB.*?\d{5}/);
-    if (oabText) {
-      oab = oabText[0].match(/\d{5}/)[0];
-    }
-
-    // Se o link não tiver os dados, tenta o trecho (snippet) do resultado
-    if (!processNumber || !court || !jurisdiction) {
-      const snippet = $('meta[name="description"]').attr('content') || '';
-      const snippetProcess = snippet.match(/\d{5}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}/);
-      if (snippetProcess) processNumber = snippetProcess[0];
-      const snippetCourt = snippet.match(/(\d{1,2}ª?\s*Vara\s*\w*)\s*–\s*(\w+\/\w+)/);
-      if (snippetCourt) {
-        court = snippetCourt[1].trim();
-        jurisdiction = snippetCourt[2].trim();
-      }
-    }
-
-    return {
-      oab: oab || '',
-      processNumber: processNumber || '',
-      date: date,
-      court: court || '',
-      jurisdiction: jurisdiction || ''
-    };
-  } catch (error) {
-    console.error(`Erro ao acessar link ${link}: ${error.message}`);
-    return {
-      oab: '',
-      processNumber: '',
-      date: getCurrentDateFormats().full,
-      court: '',
-      jurisdiction: ''
-    };
-  }
 }
 
 // Função principal pra buscar resultados e processar (Jusbrasil)
 async function checkJusbrasil() {
-  try {
-    const url = buildSearchUrl();
-    let page = 1;
-    let hasResultsForToday = false;
-    const linksToProcess = [];
+    try {
+        // Passo 1: Obter cookies da página inicial
+        const cookies = await getInitialCookies();
+        await delay(5000); // Simula um humano esperando 5 segundos antes de fazer a pesquisa
 
-    while (true) {
-      const pageUrl = `${url}&page=${page}`;
-      const response = await axios.get(pageUrl, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-          'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
-          'Connection': 'keep-alive',
-        },
-        timeout: 10000,
-      });
-      const $ = cheerio.load(response.data);
+        const url = buildSearchUrl();
+        let page = 1;
+        let hasResultsForToday = false;
+        const linksToProcess = [];
 
-      const results = $('.search-result');
-      if (results.length === 0) break;
+        while (true) {
+            const pageUrl = `${url}&page=${page}`;
+            console.log(`Acessando página ${page}: ${pageUrl}`);
+            const response = await axios.get(pageUrl, {
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                    'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+                    'Accept-Encoding': 'gzip, deflate, br, zstd',
+                    'Connection': 'keep-alive',
+                    'Upgrade-Insecure-Requests': '1',
+                    'Sec-Fetch-Dest': 'document',
+                    'Sec-Fetch-Mode': 'navigate',
+                    'Sec-Fetch-Site': 'same-origin',
+                    'Sec-Fetch-User': '?1',
+                    'Referer': 'https://www.jusbrasil.com.br/diarios',
+                    'Cookie': cookies,
+                },
+                timeout: 10000,
+            });
+            const $ = cheerio.load(response.data);
 
-      for (let i = 0; i < results.length; i++) {
-        const title = $(results[i]).find('.search-result__title').text();
-        if (isCurrentDateInTitle(title)) {
-          hasResultsForToday = true;
-          const link = $(results[i]).find('a').attr('href');
-          if (link) linksToProcess.push(link);
-        } else {
-          return { stop: true, links: linksToProcess };
+            const results = $('.search-result');
+            if (results.length === 0) break;
+
+            for (let i = 0; i < results.length; i++) {
+                const title = $(results[i]).find('.search-result__title').text();
+                if (isCurrentDateInTitle(title)) {
+                    hasResultsForToday = true;
+                    const link = $(results[i]).find('a').attr('href');
+                    if (link) linksToProcess.push(link);
+                } else {
+                    return { stop: true, links: linksToProcess };
+                }
+            }
+
+            if (!hasResultsForToday) {
+                page++;
+                await delay(5000); // Simula um humano navegando entre páginas
+            } else {
+                break;
+            }
         }
-      }
 
-      if (!hasResultsForToday) {
-        page++;
-      } else {
-        break;
-      }
+        return { stop: hasResultsForToday, links: linksToProcess };
+    } catch (error) {
+        console.error(`Erro ao buscar resultados: ${error.message}`);
+        return { stop: false, links: [] };
     }
-
-    return { stop: hasResultsForToday, links: linksToProcess };
-  } catch (error) {
-    console.error(`Erro ao buscar resultados: ${error.message}`);
-    return { stop: false, links: [] };
-  }
 }
 
 // Função pra rodar a busca no Jusbrasil a cada 20 minutos entre 9h e 18h
