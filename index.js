@@ -295,7 +295,15 @@ function isCurrentDateInTitle(title) {
 // Função pra extrair dados de um link do Jusbrasil
 async function extractDataFromLink(link) {
   try {
-    const response = await axios.get(link);
+    const response = await axios.get(link, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Connection': 'keep-alive',
+      },
+      timeout: 10000,
+    });
     const $ = cheerio.load(response.data);
 
     // Extrair número do processo (ex.: "12345-67.2023.8.05.0001")
@@ -365,7 +373,15 @@ async function checkJusbrasil() {
 
     while (true) {
       const pageUrl = `${url}&page=${page}`;
-      const response = await axios.get(pageUrl);
+      const response = await axios.get(pageUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+          'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+          'Connection': 'keep-alive',
+        },
+        timeout: 10000,
+      });
       const $ = cheerio.load(response.data);
 
       const results = $('.search-result');
