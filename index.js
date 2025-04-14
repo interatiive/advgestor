@@ -3,9 +3,11 @@ const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = requi
 const fetch = require('node-fetch');
 const fs = require('fs').promises;
 const path = require('path');
-const axios = require('axios'); // Adicionado pra Jusbrasil
-const cheerio = require('cheerio'); // Adicionado pra Jusbrasil
-const cron = require('node-cron'); // Adicionado pra agendamento do Jusbrasil
+const axios = require('axios');
+const cheerio = require('cheerio');
+const cron = require('node-cron');
+const exifParser = require('exif-parser');
+const FormData = require('form-data');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -42,6 +44,9 @@ app.use((req, res, next) => {
   }
   return express.json()(req, res, next);
 });
+
+// Middleware pra URL-encoded (pra /validate-media)
+app.use(express.urlencoded({ extended: true }));
 
 // Função para limpar e corrigir JSON
 const cleanAndParseJSON = (data) => {
@@ -262,31 +267,29 @@ const connectToWhatsApp = async (retryCount = 0) => {
 
 // --- Código do Jusbrasil ---
 
-// Função pra formatar a data atual no formato do Jusbrasil (ex.: "14/04/2025" e "14/04/25")
+// Função pra formatar a data atual no formato do Jusbrasil (ex.: "14/04/2025")
 function getCurrentDateFormats() {
   const today = new Date();
   const day = String(today.getDate()).padStart(2, '0');
   const month = String(today.getMonth() + 1).padStart(2, '0');
   const year = today.getFullYear();
-  const shortYear = String(year).slice(-2);
   return {
     full: `${day}/${month}/${year}`, // Ex.: "14/04/2025"
-    short: `${day}/${month}/${shortYear}` // Ex.: "14/04/25"
   };
 }
 
 // Função pra construir o link de busca no Jusbrasil
 function buildSearchUrl() {
   const lawyerName = process.env.LAWYER_NAME;
-  const { full, short } = getCurrentDateFormats();
-  const query = `"${encodeURIComponent(lawyerName)}" AND ("${encodeURIComponent(full)}" OR "${encodeURIComponent(short)}")`;
+  const { full } = getCurrentDateFormats();
+  const query = `"${encodeURIComponent(lawyerName)}" "${encodeURIComponent(full)}"`;
   return `https://www.jusbrasil.com.br/diarios/busca?q=${query}&o=data`;
 }
 
 // Função pra verificar se a data no título corresponde ao dia atual
 function isCurrentDateInTitle(title) {
-  const { full, short } = getCurrentDateFormats();
-  return title.includes(full) || title.includes(short);
+  const { full } = getCurrentDateFormats();
+  return title.includes(full);
 }
 
 // Função pra extrair dados de um link do Jusbrasil
@@ -415,6 +418,164 @@ function startJusbrasilCheck() {
     }
   });
 }
+
+// --- Código pra validação de mídia ---
+
+// Função pra baixar a imagem
+async function downloadImage(url) {
+  const response = await axios.get(url, { responseType: 'arraybuffer' });
+  return Buffer.from(response.data);
+}
+
+// Função pra gerar hash SHA-256
+function generateHash(data) {
+  return require('crypto').createHash('sha256').update(data).digest('hex');
+}
+
+// Função pra extrair metadados EXIF
+function extractExif(imageBuffer) {
+  try {
+    const parser = exifParser.create(imageBuffer);
+    const result = parser.parse();
+    return {
+      date: result.tags.DateTimeOriginal || '',
+      make: result.tags.Make || '',
+      model: result.tags.Model || '',
+      gps: result.tags.GPSLatitude && result.tags.GPSLongitude ? {
+        latitude: result.tags.GPSLatitude,
+        longitude: result.tags.GPSLongitude
+      } : null
+    };
+  } catch (error) {
+    console.error('Erro ao extrair EXIF:', error.message);
+    return {};
+  }
+}
+
+// Função pra verificar clareza da imagem (resolução mínima)
+function checkImageClarity(imageBuffer) {
+  const { width, height } = require('image-size')(imageBuffer);
+  const minResolution = { width: 1280, height: 720 }; // 720p
+  return {
+    isClear: width >= minResolution.width && height >= minResolution.height,
+    resolution: `${width}x${height}`
+  };
+}
+
+// Função pra adicionar timestamp (usando FreeTSA)
+async function addTimestamp(hash) {
+  try {
+    const form = new FormData();
+    form.append('hash', hash);
+    form.append('hash_algorithm', 'sha256');
+    const response = await axios.post('https://freetsa.org/tsr', form, {
+      headers: form.getHeaders(),
+      responseType: 'arraybuffer'
+    });
+    const timestamp = response.headers['date'];
+    return { timestamp, tsr: Buffer.from(response.data).toString('base64') };
+  } catch (error) {
+    console.error('Erro ao adicionar timestamp:', error.message);
+    return { timestamp: new Date().toISOString(), tsr: null };
+  }
+}
+
+// Função pra registrar na blockchain (usando OpenTimestamps)
+async function registerOnBlockchain(hash) {
+  try {
+    const form = new FormData();
+    form.append('hash', hash);
+    form.append('type', 'sha256');
+    const response = await axios.post('https://opentimestamps.org/api/stamp', form, {
+      headers: form.getHeaders(),
+      responseType: 'arraybuffer'
+    });
+    return Buffer.from(response.data).toString('base64');
+  } catch (error) {
+    console.error('Erro ao registrar na blockchain:', error.message);
+    return null;
+  }
+}
+
+// Função auxiliar pra processar uma única imagem
+async function processSingleImage(imageUrl, uploaderName, uploaderDocument, uploadTimestamp) {
+  console.log(`[Validate-Media] Processando imagem: ${imageUrl}`);
+
+  // Cadeia de custódia
+  const chainOfCustody = [
+    { step: 'Upload pelo cliente', who: uploaderName, when: uploadTimestamp },
+    { step: 'Recebido pelo Make', who: 'Make Workflow', when: new Date().toISOString() },
+    { step: 'Processado pelo Render', who: 'Render Server', when: new Date().toISOString() }
+  ];
+
+  // Baixar a imagem
+  const imageBuffer = await downloadImage(imageUrl);
+
+  // Gerar hash
+  const hash = generateHash(imageBuffer);
+  console.log(`[Validate-Media] Hash gerado: ${hash}`);
+
+  // Extrair metadados EXIF
+  const exif = extractExif(imageBuffer);
+  console.log(`[Validate-Media] Metadados EXIF:`, exif);
+
+  // Verificar clareza
+  const clarity = checkImageClarity(imageBuffer);
+  console.log(`[Validate-Media] Clareza da imagem:`, clarity);
+
+  // Adicionar timestamp
+  const { timestamp, tsr } = await addTimestamp(hash);
+  console.log(`[Validate-Media] Timestamp adicionado: ${timestamp}`);
+
+  // Registrar na blockchain
+  const blockchainProof = await registerOnBlockchain(hash);
+  console.log(`[Validate-Media] Blockchain proof: ${blockchainProof ? 'Gerado' : 'Falhou'}`);
+
+  // Autenticação da origem
+  const origin = {
+    uploader: uploaderName,
+    uploaderDocument: uploaderDocument,
+    uploadTimestamp: uploadTimestamp,
+    deviceInfo: exif.make && exif.model ? `${exif.make} ${exif.model}` : 'Desconhecido'
+  };
+
+  return {
+    originalUrl: imageUrl,
+    hash,
+    exif,
+    clarity,
+    timestamp,
+    timestampProof: tsr,
+    blockchainProof,
+    chainOfCustody,
+    origin
+  };
+}
+
+// Rota pra validar mídia
+app.post('/validate-media', async (req, res) => {
+  try {
+    const { imageUrls, uploaderName, uploaderDocument, uploadTimestamp, uploaderEmail } = req.body;
+    if (!imageUrls || !Array.isArray(imageUrls) || imageUrls.length === 0) {
+      return res.status(400).json({ error: 'imageUrls é obrigatório e deve ser uma lista não vazia' });
+    }
+    if (!uploaderName || !uploaderDocument || !uploadTimestamp || !uploaderEmail) {
+      return res.status(400).json({ error: 'uploaderName, uploaderDocument, uploadTimestamp e uploaderEmail são obrigatórios' });
+    }
+
+    console.log(`[Validate-Media] Processando ${imageUrls.length} imagens`);
+
+    // Processar cada imagem em paralelo
+    const results = await Promise.all(
+      imageUrls.map(url => processSingleImage(url, uploaderName, uploaderDocument, uploadTimestamp))
+    );
+
+    res.json({ images: results, uploaderEmail });
+  } catch (error) {
+    console.error('[Validate-Media] Erro ao processar imagens:', error.message);
+    res.status(500).json({ error: 'Erro ao processar imagens' });
+  }
+});
 
 // Inicia o servidor
 app.listen(port, '0.0.0.0', () => {
