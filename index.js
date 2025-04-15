@@ -6,6 +6,13 @@ const path = require('path');
 const axios = require('axios');
 const exifParser = require('exif-parser');
 const FormData = require('form-data');
+const OpenTimestamps = require('opentimestamps');
+const asn1js = require('asn1js');
+const pkijs = require('pkijs');
+const crypto = require('crypto');
+
+// Configurar pkijs
+const { TimeStampReq, MessageImprint, TimeStampResp } = pkijs;
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -278,7 +285,7 @@ async function downloadImage(url) {
 
 // Função pra gerar hash SHA-256
 function generateHash(data) {
-  return require('crypto').createHash('sha256').update(data).digest('hex');
+  return crypto.createHash('sha256').update(data).digest('hex');
 }
 
 // Função pra extrair metadados EXIF
@@ -316,18 +323,44 @@ function checkImageClarity(imageBuffer) {
   }
 }
 
-// Função pra adicionar timestamp (usando FreeTSA)
+// Função pra criar uma requisição de timestamp query (RFC 3161)
+function createTimestampQuery(hash) {
+  const hashBuffer = Buffer.from(hash, 'hex');
+  const messageImprint = new MessageImprint({
+    hashAlgorithm: { algorithm: '2.16.840.1.101.3.4.2.1' }, // SHA-256 OID
+    hashedMessage: new asn1js.OctetString({ valueHex: hashBuffer })
+  });
+
+  const tsr = new TimeStampReq({
+    version: 1,
+    messageImprint,
+    certReq: true
+  });
+
+  return Buffer.from(tsr.toSchema().toBER(false));
+}
+
+// Função pra adicionar timestamp (usando Sectigo TSA)
 async function addTimestamp(hash) {
   try {
-    const form = new FormData();
-    form.append('hash', hash);
-    form.append('hash_algorithm', 'sha256');
-    const response = await axios.post('https://freetsa.org/tsr', form, {
-      headers: form.getHeaders(),
+    const tsQuery = createTimestampQuery(hash);
+    const response = await axios.post('http://timestamp.sectigo.com', tsQuery, {
+      headers: {
+        'Content-Type': 'application/timestamp-query',
+        'Accept': 'application/timestamp-reply'
+      },
       responseType: 'arraybuffer'
     });
-    const timestamp = response.headers['date'];
-    return { timestamp, tsr: Buffer.from(response.data).toString('base64') };
+
+    const tsRespBuffer = Buffer.from(response.data);
+    const asn1Resp = asn1js.fromBER(tsRespBuffer);
+    const tsResp = new TimeStampResp({ schema: asn1Resp.result });
+
+    const tstInfo = tsResp.timeStampToken.tstInfo;
+    const timestamp = tstInfo.genTime.toISOString();
+    const tsr = tsRespBuffer.toString('base64');
+
+    return { timestamp, tsr };
   } catch (error) {
     console.error('Erro ao adicionar timestamp:', error.message);
     return { timestamp: new Date().toISOString(), tsr: null };
@@ -337,14 +370,10 @@ async function addTimestamp(hash) {
 // Função pra registrar na blockchain (usando OpenTimestamps)
 async function registerOnBlockchain(hash) {
   try {
-    const form = new FormData();
-    form.append('hash', hash);
-    form.append('type', 'sha256');
-    const response = await axios.post('https://opentimestamps.org/api/stamp', form, {
-      headers: form.getHeaders(),
-      responseType: 'arraybuffer'
-    });
-    return Buffer.from(response.data).toString('base64');
+    const hashBuffer = Buffer.from(hash, 'hex');
+    const otsStamp = await OpenTimestamps.stamp(hashBuffer);
+    const timestampProof = Buffer.from(otsStamp).toString('base64');
+    return timestampProof;
   } catch (error) {
     console.error('Erro ao registrar na blockchain:', error.message);
     return null;
