@@ -4,7 +4,7 @@ const fetch = require('node-fetch');
 const fs = require('fs').promises;
 const path = require('path');
 const axios = require('axios');
-const exifParser = require('exif-parser');
+const ExifReader = require('exifreader');
 const FormData = require('form-data');
 const OpenTimestamps = require('opentimestamps');
 const asn1js = require('asn1js');
@@ -288,18 +288,37 @@ function generateHash(data) {
   return crypto.createHash('sha256').update(data).digest('hex');
 }
 
-// Função pra extrair metadados EXIF
+// Função pra extrair metadados EXIF usando exifreader
 function extractExif(imageBuffer) {
   try {
-    const parser = exifParser.create(imageBuffer);
-    const result = parser.parse();
+    const tags = ExifReader.load(imageBuffer);
+    console.log(`[Validate-Media] Tags EXIF brutas:`, tags);
+    
+    // Converter coordenadas DMS para decimal, se disponíveis
+    const getGpsCoordinate = (value, ref) => {
+      if (!value || !ref) return null;
+      const degrees = value[0].numerator / value[0].denominator;
+      const minutes = value[1].numerator / value[1].denominator;
+      const seconds = value[2].numerator / value[2].denominator;
+      let decimal = degrees + (minutes / 60) + (seconds / 3600);
+      if (ref === 'S' || ref === 'W') decimal = -decimal;
+      return decimal;
+    };
+
+    const gpsLatitude = tags['GPSLatitude'] && tags['GPSLatitudeRef']
+      ? getGpsCoordinate(tags['GPSLatitude'].value, tags['GPSLatitudeRef'].description)
+      : null;
+    const gpsLongitude = tags['GPSLongitude'] && tags['GPSLongitudeRef']
+      ? getGpsCoordinate(tags['GPSLongitude'].value, tags['GPSLongitudeRef'].description)
+      : null;
+
     return {
-      date: result.tags.DateTimeOriginal || '',
-      make: result.tags.Make || '',
-      model: result.tags.Model || '',
-      gps: result.tags.GPSLatitude && result.tags.GPSLongitude ? {
-        latitude: result.tags.GPSLatitude,
-        longitude: result.tags.GPSLongitude
+      date: tags['DateTimeOriginal']?.description || '',
+      make: tags['Make']?.description || '',
+      model: tags['Model']?.description || '',
+      gps: gpsLatitude && gpsLongitude ? {
+        latitude: gpsLatitude,
+        longitude: gpsLongitude
       } : null
     };
   } catch (error) {
@@ -367,6 +386,10 @@ async function addTimestamp(hash) {
     }
 
     const tsResp = new TimeStampResp({ schema: asn1Resp.result });
+    if (!tsResp.timeStampToken || !tsResp.timeStampToken.tstInfo) {
+      throw new Error('Resposta do TSA não contém tstInfo');
+    }
+
     const tstInfo = tsResp.timeStampToken.tstInfo;
     const timestamp = tstInfo.genTime.toISOString();
     const tsr = tsRespBuffer.toString('base64');
@@ -387,9 +410,12 @@ async function registerOnBlockchain(hash) {
       throw new Error('Hash inválido: deve ter 32 bytes (SHA-256)');
     }
     console.log(`[Validate-Media] Registrando hash na blockchain: ${hash}`);
-    const otsStamp = await OpenTimestamps.stamp(hashBuffer);
+    // Criar um objeto DetachedTimestampFile para o OpenTimestamps
+    const detached = OpenTimestamps.DetachedTimestampFile.fromHash(OpenTimestamps.Ops.OpSHA256(), hashBuffer);
+    console.log(`[Validate-Media] Objeto DetachedTimestampFile criado`);
+    await OpenTimestamps.stamp(detached);
     console.log(`[Validate-Media] Timestamp OTS gerado`);
-    const timestampProof = Buffer.from(otsStamp).toString('base64');
+    const timestampProof = Buffer.from(detached.serializeToBytes()).toString('base64');
     return timestampProof;
   } catch (error) {
     console.error('Erro ao registrar na blockchain:', error.message);
