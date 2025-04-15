@@ -12,7 +12,7 @@ const pkijs = require('pkijs');
 const crypto = require('crypto');
 
 // Configurar pkijs
-const { TimeStampReq, MessageImprint, TimeStampResp } = pkijs;
+const { TimeStampReq, MessageImprint, TimeStampResp, AlgorithmIdentifier } = pkijs;
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -326,8 +326,13 @@ function checkImageClarity(imageBuffer) {
 // Função pra criar uma requisição de timestamp query (RFC 3161)
 function createTimestampQuery(hash) {
   const hashBuffer = Buffer.from(hash, 'hex');
+  
+  const hashAlgorithm = new AlgorithmIdentifier({
+    algorithmId: '2.16.840.1.101.3.4.2.1' // SHA-256 OID
+  });
+
   const messageImprint = new MessageImprint({
-    hashAlgorithm: { algorithm: '2.16.840.1.101.3.4.2.1' }, // SHA-256 OID
+    hashAlgorithm: hashAlgorithm,
     hashedMessage: new asn1js.OctetString({ valueHex: hashBuffer })
   });
 
@@ -343,7 +348,9 @@ function createTimestampQuery(hash) {
 // Função pra adicionar timestamp (usando Sectigo TSA)
 async function addTimestamp(hash) {
   try {
+    console.log(`[Validate-Media] Criando timestamp query para hash: ${hash}`);
     const tsQuery = createTimestampQuery(hash);
+    console.log(`[Validate-Media] Enviando requisição para Sectigo TSA...`);
     const response = await axios.post('http://timestamp.sectigo.com', tsQuery, {
       headers: {
         'Content-Type': 'application/timestamp-query',
@@ -352,10 +359,14 @@ async function addTimestamp(hash) {
       responseType: 'arraybuffer'
     });
 
+    console.log(`[Validate-Media] Resposta recebida do Sectigo TSA`);
     const tsRespBuffer = Buffer.from(response.data);
     const asn1Resp = asn1js.fromBER(tsRespBuffer);
-    const tsResp = new TimeStampResp({ schema: asn1Resp.result });
+    if (asn1Resp.offset === -1) {
+      throw new Error('Falha ao parsear resposta do TSA');
+    }
 
+    const tsResp = new TimeStampResp({ schema: asn1Resp.result });
     const tstInfo = tsResp.timeStampToken.tstInfo;
     const timestamp = tstInfo.genTime.toISOString();
     const tsr = tsRespBuffer.toString('base64');
@@ -370,8 +381,14 @@ async function addTimestamp(hash) {
 // Função pra registrar na blockchain (usando OpenTimestamps)
 async function registerOnBlockchain(hash) {
   try {
+    // O hash já está em hex, então convertemos para Buffer corretamente
     const hashBuffer = Buffer.from(hash, 'hex');
+    if (hashBuffer.length !== 32) {
+      throw new Error('Hash inválido: deve ter 32 bytes (SHA-256)');
+    }
+    console.log(`[Validate-Media] Registrando hash na blockchain: ${hash}`);
     const otsStamp = await OpenTimestamps.stamp(hashBuffer);
+    console.log(`[Validate-Media] Timestamp OTS gerado`);
     const timestampProof = Buffer.from(otsStamp).toString('base64');
     return timestampProof;
   } catch (error) {
