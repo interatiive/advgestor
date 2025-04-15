@@ -336,12 +336,12 @@ async function registerOnBlockchain(hash) {
 }
 
 // Função auxiliar pra processar uma única imagem
-async function processSingleImage(imageUrl, uploaderName, uploaderDocument, uploadTimestamp) {
+async function processSingleImage(imageUrl) {
   console.log(`[Validate-Media] Processando imagem: ${imageUrl}`);
 
   // Cadeia de custódia
   const chainOfCustody = [
-    { step: 'Upload pelo cliente', who: uploaderName, when: uploadTimestamp },
+    { step: 'Upload pelo cliente', who: 'Cliente via Wix', when: new Date().toISOString() },
     { step: 'Recebido pelo Make', who: 'Make Workflow', when: new Date().toISOString() },
     { step: 'Processado pelo Render', who: 'Render Server', when: new Date().toISOString() }
   ];
@@ -371,9 +371,9 @@ async function processSingleImage(imageUrl, uploaderName, uploaderDocument, uplo
 
   // Autenticação da origem
   const origin = {
-    uploader: uploaderName,
-    uploaderDocument: uploaderDocument,
-    uploadTimestamp: uploadTimestamp,
+    uploader: 'Cliente via Wix',
+    uploaderDocument: 'Não fornecido',
+    uploadTimestamp: new Date().toISOString(),
     deviceInfo: exif.make && exif.model ? `${exif.make} ${exif.model}` : 'Desconhecido'
   };
 
@@ -393,22 +393,26 @@ async function processSingleImage(imageUrl, uploaderName, uploaderDocument, uplo
 // Rota pra validar mídia
 app.post('/validate-media', async (req, res) => {
   try {
-    const { imageUrls, uploaderName, uploaderDocument, uploadTimestamp, uploaderEmail } = req.body;
-    if (!imageUrls || !Array.isArray(imageUrls) || imageUrls.length === 0) {
-      return res.status(400).json({ error: 'imageUrls é obrigatório e deve ser uma lista não vazia' });
+    let { imageUrls } = req.body;
+
+    // Verificar se imageUrls é uma string e convertê-la em array, se necessário
+    if (typeof imageUrls === 'string') {
+      imageUrls = imageUrls.split(', ').map(url => url.trim());
     }
-    if (!uploaderName || !uploaderDocument || !uploadTimestamp || !uploaderEmail) {
-      return res.status(400).json({ error: 'uploaderName, uploaderDocument, uploadTimestamp e uploaderEmail são obrigatórios' });
+
+    // Validar se imageUrls é um array e não está vazio
+    if (!Array.isArray(imageUrls) || imageUrls.length === 0) {
+      return res.status(400).json({ error: 'imageUrls é obrigatório e deve ser uma lista não vazia' });
     }
 
     console.log(`[Validate-Media] Processando ${imageUrls.length} imagens`);
 
     // Processar cada imagem em paralelo
     const results = await Promise.all(
-      imageUrls.map(url => processSingleImage(url, uploaderName, uploaderDocument, uploadTimestamp))
+      imageUrls.map(url => processSingleImage(url))
     );
 
-    res.json({ images: results, uploaderEmail });
+    res.json({ images: results });
   } catch (error) {
     console.error('[Validate-Media] Erro ao processar imagens:', error.message);
     res.status(500).json({ error: 'Erro ao processar imagens' });
