@@ -261,8 +261,19 @@ const connectToWhatsApp = async (retryCount = 0) => {
 
 // Função pra baixar a imagem
 async function downloadImage(url) {
-  const response = await axios.get(url, { responseType: 'arraybuffer' });
-  return Buffer.from(response.data);
+  try {
+    const response = await axios.get(url, {
+      responseType: 'arraybuffer',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Referer': 'https://www.wix.com'
+      }
+    });
+    return Buffer.from(response.data);
+  } catch (error) {
+    console.error(`Erro ao baixar a imagem ${url}:`, error.message);
+    throw new Error(`Falha ao baixar a imagem: ${error.message}`);
+  }
 }
 
 // Função pra gerar hash SHA-256
@@ -292,12 +303,17 @@ function extractExif(imageBuffer) {
 
 // Função pra verificar clareza da imagem (resolução mínima)
 function checkImageClarity(imageBuffer) {
-  const { width, height } = require('image-size')(imageBuffer);
-  const minResolution = { width: 1280, height: 720 }; // 720p
-  return {
-    isClear: width >= minResolution.width && height >= minResolution.height,
-    resolution: `${width}x${height}`
-  };
+  try {
+    const { width, height } = require('image-size')(imageBuffer);
+    const minResolution = { width: 1280, height: 720 }; // 720p
+    return {
+      isClear: width >= minResolution.width && height >= minResolution.height,
+      resolution: `${width}x${height}`
+    };
+  } catch (error) {
+    console.error('Erro ao verificar clareza da imagem:', error.message);
+    return { isClear: false, resolution: 'Desconhecida' };
+  }
 }
 
 // Função pra adicionar timestamp (usando FreeTSA)
@@ -346,48 +362,58 @@ async function processSingleImage(imageUrl) {
     { step: 'Processado pelo Render', who: 'Render Server', when: new Date().toISOString() }
   ];
 
-  // Baixar a imagem
-  const imageBuffer = await downloadImage(imageUrl);
+  try {
+    // Baixar a imagem
+    const imageBuffer = await downloadImage(imageUrl);
 
-  // Gerar hash
-  const hash = generateHash(imageBuffer);
-  console.log(`[Validate-Media] Hash gerado: ${hash}`);
+    // Gerar hash
+    const hash = generateHash(imageBuffer);
+    console.log(`[Validate-Media] Hash gerado: ${hash}`);
 
-  // Extrair metadados EXIF
-  const exif = extractExif(imageBuffer);
-  console.log(`[Validate-Media] Metadados EXIF:`, exif);
+    // Extrair metadados EXIF
+    const exif = extractExif(imageBuffer);
+    console.log(`[Validate-Media] Metadados EXIF:`, exif);
 
-  // Verificar clareza
-  const clarity = checkImageClarity(imageBuffer);
-  console.log(`[Validate-Media] Clareza da imagem:`, clarity);
+    // Verificar clareza
+    const clarity = checkImageClarity(imageBuffer);
+    console.log(`[Validate-Media] Clareza da imagem:`, clarity);
 
-  // Adicionar timestamp
-  const { timestamp, tsr } = await addTimestamp(hash);
-  console.log(`[Validate-Media] Timestamp adicionado: ${timestamp}`);
+    // Adicionar timestamp
+    const { timestamp, tsr } = await addTimestamp(hash);
+    console.log(`[Validate-Media] Timestamp adicionado: ${timestamp}`);
 
-  // Registrar na blockchain
-  const blockchainProof = await registerOnBlockchain(hash);
-  console.log(`[Validate-Media] Blockchain proof: ${blockchainProof ? 'Gerado' : 'Falhou'}`);
+    // Registrar na blockchain
+    const blockchainProof = await registerOnBlockchain(hash);
+    console.log(`[Validate-Media] Blockchain proof: ${blockchainProof ? 'Gerado' : 'Falhou'}`);
 
-  // Autenticação da origem
-  const origin = {
-    uploader: 'Cliente via Wix',
-    uploaderDocument: 'Não fornecido',
-    uploadTimestamp: new Date().toISOString(),
-    deviceInfo: exif.make && exif.model ? `${exif.make} ${exif.model}` : 'Desconhecido'
-  };
+    // Autenticação da origem
+    const origin = {
+      uploader: 'Cliente via Wix',
+      uploaderDocument: 'Não fornecido',
+      uploadTimestamp: new Date().toISOString(),
+      deviceInfo: exif.make && exif.model ? `${exif.make} ${exif.model}` : 'Desconhecido'
+    };
 
-  return {
-    originalUrl: imageUrl,
-    hash,
-    exif,
-    clarity,
-    timestamp,
-    timestampProof: tsr,
-    blockchainProof,
-    chainOfCustody,
-    origin
-  };
+    return {
+      success: true,
+      originalUrl: imageUrl,
+      hash,
+      exif,
+      clarity,
+      timestamp,
+      timestampProof: tsr,
+      blockchainProof,
+      chainOfCustody,
+      origin
+    };
+  } catch (error) {
+    console.error(`[Validate-Media] Erro ao processar imagem ${imageUrl}:`, error.message);
+    return {
+      success: false,
+      originalUrl: imageUrl,
+      error: error.message
+    };
+  }
 }
 
 // Rota pra validar mídia
@@ -395,9 +421,12 @@ app.post('/validate-media', async (req, res) => {
   try {
     let { imageUrls } = req.body;
 
+    console.log(`[Validate-Media] Recebido imageUrls: ${imageUrls}`);
+
     // Verificar se imageUrls é uma string e convertê-la em array, se necessário
     if (typeof imageUrls === 'string') {
-      imageUrls = imageUrls.split(', ').map(url => url.trim());
+      imageUrls = imageUrls.split(/,\s*/).map(url => url.trim());
+      console.log(`[Validate-Media] Após split:`, imageUrls);
     }
 
     // Validar se imageUrls é um array e não está vazio
@@ -412,11 +441,34 @@ app.post('/validate-media', async (req, res) => {
       imageUrls.map(url => processSingleImage(url))
     );
 
-    res.json({ images: results });
+    // Separar resultados bem-sucedidos de falhas
+    const successfulResults = results.filter(result => result.success);
+    const failedResults = results.filter(result => !result.success);
+
+    if (successfulResults.length === 0) {
+      return res.status(500).json({
+        error: 'Nenhuma imagem pôde ser processada',
+        failed: failedResults
+      });
+    }
+
+    res.json({
+      images: successfulResults,
+      failed: failedResults.length > 0 ? failedResults : undefined
+    });
   } catch (error) {
     console.error('[Validate-Media] Erro ao processar imagens:', error.message);
-    res.status(500).json({ error: 'Erro ao processar imagens' });
+    res.status(500).json({ error: 'Erro ao processar imagens', details: error.message });
   }
+});
+
+// Middleware para tratamento de erros
+app.use((err, req, res, next) => {
+  if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
+    console.error('Erro de parsing JSON:', err.message);
+    return res.status(400).json({ error: 'Corpo da requisição não é um JSON válido' });
+  }
+  next();
 });
 
 // Inicia o servidor
