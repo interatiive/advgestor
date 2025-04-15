@@ -293,7 +293,7 @@ function extractExif(imageBuffer) {
   try {
     const tags = ExifReader.load(imageBuffer);
     console.log(`[Validate-Media] Tags EXIF brutas:`, tags);
-    
+
     // Converter coordenadas DMS para decimal, se disponíveis
     const getGpsCoordinate = (value, ref) => {
       if (!value || !ref) return null;
@@ -305,6 +305,7 @@ function extractExif(imageBuffer) {
       return decimal;
     };
 
+    // Tentar extrair metadados EXIF padrão
     const gpsLatitude = tags['GPSLatitude'] && tags['GPSLatitudeRef']
       ? getGpsCoordinate(tags['GPSLatitude'].value, tags['GPSLatitudeRef'].description)
       : null;
@@ -312,7 +313,7 @@ function extractExif(imageBuffer) {
       ? getGpsCoordinate(tags['GPSLongitude'].value, tags['GPSLongitudeRef'].description)
       : null;
 
-    return {
+    let exifData = {
       date: tags['DateTimeOriginal']?.description || '',
       make: tags['Make']?.description || '',
       model: tags['Model']?.description || '',
@@ -321,9 +322,43 @@ function extractExif(imageBuffer) {
         longitude: gpsLongitude
       } : null
     };
+
+    // Se for uma imagem PNG e não houver metadados EXIF úteis, tentar extrair metadados alternativos
+    if (tags['FileType']?.value === 'png' && !exifData.date && !exifData.make && !exifData.model) {
+      console.log('[Validate-Media] Imagem PNG detectada. Tentando extrair metadados alternativos...');
+      
+      // Tentar extrair metadados de blocos de texto PNG (tEXt, iTXt)
+      const textFields = {};
+      for (const key in tags) {
+        if (key.startsWith('TextEntry_')) {
+          const textKey = tags[key].keyword || key;
+          const textValue = tags[key].value || '';
+          textFields[textKey] = textValue;
+        }
+      }
+      console.log('[Validate-Media] Campos de texto PNG (tEXt/iTXt):', textFields);
+
+      // Tentar extrair metadados XMP, se disponíveis
+      if (tags['XMP']) {
+        const xmpData = tags['XMP'].description;
+        console.log('[Validate-Media] Dados XMP encontrados:', xmpData);
+        // Parsear XMP manualmente (simplificado, pode ser expandido se necessário)
+        const xmpDateMatch = xmpData.match(/<xmp:CreateDate>(.*?)<\/xmp:CreateDate>/);
+        const xmpCreatorMatch = xmpData.match(/<dc:creator>(.*?)<\/dc:creator>/);
+        if (xmpDateMatch) exifData.date = xmpDateMatch[1];
+        if (xmpCreatorMatch) exifData.make = xmpCreatorMatch[1];
+      }
+
+      // Mapear campos de texto para os campos esperados, se disponíveis
+      exifData.date = exifData.date || textFields['Creation Time'] || textFields['Date'] || '';
+      exifData.make = exifData.make || textFields['Make'] || textFields['Author'] || '';
+      exifData.model = exifData.model || textFields['Model'] || textFields['Device'] || '';
+    }
+
+    return exifData;
   } catch (error) {
     console.error('Erro ao extrair EXIF:', error.message);
-    return {};
+    return { date: '', make: '', model: '', gps: null };
   }
 }
 
@@ -364,40 +399,55 @@ function createTimestampQuery(hash) {
   return Buffer.from(tsr.toSchema().toBER(false));
 }
 
-// Função pra adicionar timestamp (usando Sectigo TSA)
+// Função pra adicionar timestamp (usando Sectigo TSA e FreeTSA como fallback)
 async function addTimestamp(hash) {
-  try {
-    console.log(`[Validate-Media] Criando timestamp query para hash: ${hash}`);
-    const tsQuery = createTimestampQuery(hash);
-    console.log(`[Validate-Media] Enviando requisição para Sectigo TSA...`);
-    const response = await axios.post('http://timestamp.sectigo.com', tsQuery, {
-      headers: {
-        'Content-Type': 'application/timestamp-query',
-        'Accept': 'application/timestamp-reply'
-      },
-      responseType: 'arraybuffer'
-    });
+  const tsaServers = [
+    { name: 'Sectigo TSA', url: 'http://timestamp.sectigo.com' },
+    { name: 'FreeTSA', url: 'https://freetsa.org/tsr' }
+  ];
 
-    console.log(`[Validate-Media] Resposta recebida do Sectigo TSA`);
-    const tsRespBuffer = Buffer.from(response.data);
-    const asn1Resp = asn1js.fromBER(tsRespBuffer);
-    if (asn1Resp.offset === -1) {
-      throw new Error('Falha ao parsear resposta do TSA');
+  for (const tsa of tsaServers) {
+    try {
+      console.log(`[Validate-Media] Criando timestamp query para hash: ${hash}`);
+      const tsQuery = createTimestampQuery(hash);
+      console.log(`[Validate-Media] Enviando requisição para ${tsa.name} (${tsa.url})...`);
+      const response = await axios.post(tsa.url, tsQuery, {
+        headers: {
+          'Content-Type': 'application/timestamp-query',
+          'Accept': 'application/timestamp-reply'
+        },
+        responseType: 'arraybuffer',
+        timeout: 10000
+      });
+
+      console.log(`[Validate-Media] Resposta recebida do ${tsa.name}`);
+      const tsRespBuffer = Buffer.from(response.data);
+      console.log(`[Validate-Media] Resposta bruta do ${tsa.name} (base64):`, tsRespBuffer.toString('base64'));
+
+      const asn1Resp = asn1js.fromBER(tsRespBuffer);
+      if (asn1Resp.offset === -1) {
+        throw new Error('Falha ao parsear resposta do TSA');
+      }
+
+      const tsResp = new TimeStampResp({ schema: asn1Resp.result });
+      if (!tsResp.timeStampToken || !tsResp.timeStampToken.tstInfo) {
+        throw new Error('Resposta do TSA não contém tstInfo');
+      }
+
+      const tstInfo = tsResp.timeStampToken.tstInfo;
+      const timestamp = tstInfo.genTime.toISOString();
+      const tsr = tsRespBuffer.toString('base64');
+
+      console.log(`[Validate-Media] Timestamp adicionado com sucesso pelo ${tsa.name}: ${timestamp}`);
+      return { timestamp, tsr };
+    } catch (error) {
+      console.error(`Erro ao adicionar timestamp com ${tsa.name}:`, error.message);
+      if (tsa.name === tsaServers[tsaServers.length - 1].name) {
+        console.error('[Validate-Media] Todos os TSAs falharam. Usando timestamp local como fallback.');
+        return { timestamp: new Date().toISOString(), tsr: null };
+      }
+      console.log(`[Validate-Media] Tentando o próximo TSA...`);
     }
-
-    const tsResp = new TimeStampResp({ schema: asn1Resp.result });
-    if (!tsResp.timeStampToken || !tsResp.timeStampToken.tstInfo) {
-      throw new Error('Resposta do TSA não contém tstInfo');
-    }
-
-    const tstInfo = tsResp.timeStampToken.tstInfo;
-    const timestamp = tstInfo.genTime.toISOString();
-    const tsr = tsRespBuffer.toString('base64');
-
-    return { timestamp, tsr };
-  } catch (error) {
-    console.error('Erro ao adicionar timestamp:', error.message);
-    return { timestamp: new Date().toISOString(), tsr: null };
   }
 }
 
@@ -411,7 +461,7 @@ async function registerOnBlockchain(hash) {
     }
     console.log(`[Validate-Media] Registrando hash na blockchain: ${hash}`);
     // Criar um objeto DetachedTimestampFile para o OpenTimestamps
-    const detached = OpenTimestamps.DetachedTimestampFile.fromHash(OpenTimestamps.Ops.OpSHA256(), hashBuffer);
+    const detached = OpenTimestamps.DetachedTimestampFile.fromHash(new OpenTimestamps.Ops.OpSHA256(), hashBuffer);
     console.log(`[Validate-Media] Objeto DetachedTimestampFile criado`);
     await OpenTimestamps.stamp(detached);
     console.log(`[Validate-Media] Timestamp OTS gerado`);
