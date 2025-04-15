@@ -9,13 +9,13 @@
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.7",
     "axios": "^1.7.2",
-    "exif-parser": "^0.1.12",
     "express": "^4.19.2",
     "form-data": "^4.0.0",
     "image-size": "^1.1.1",
     "node-fetch": "^2.7.0",
     "opentimestamps": "^0.4.6",
     "asn1js": "^3.0.5",
-    "pkijs": "^3.0.15"
+    "pkijs": "^3.0.15",
+    "exifreader": "^4.13.0"
   }
 }
