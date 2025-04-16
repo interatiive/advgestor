@@ -6,7 +6,7 @@ const path = require('path');
 const axios = require('axios');
 const ExifReader = require('exifreader');
 const FormData = require('form-data');
-const pngMetadata = require('png-metadata');
+const { PNG } = require('pngjs');
 const crypto = require('crypto');
 
 const app = express();
@@ -283,7 +283,7 @@ function generateHash(data) {
   return crypto.createHash('sha256').update(data).digest('hex');
 }
 
-// Função pra extrair metadados EXIF e PNG usando exifreader e png-metadata
+// Função pra extrair metadados EXIF e PNG usando exifreader e pngjs
 function extractExif(imageBuffer) {
   try {
     const tags = ExifReader.load(imageBuffer);
@@ -329,37 +329,77 @@ function extractExif(imageBuffer) {
     if (!exifData.createDate || tags['FileType']?.value === 'png') {
       console.log('[Validate-Media] Imagem PNG ou sem createDate EXIF. Tentando extrair metadados PNG...');
       
-      try {
-        const chunks = pngMetadata.splitChunk(imageBuffer);
-        const pngData = pngMetadata.readMetadata(imageBuffer);
+      // Verificar se é uma imagem PNG válida
+      const isPng = imageBuffer.slice(0, 8).toString('hex') === '89504e470d0a1a0a'; // Assinatura PNG
+      if (isPng) {
+        try {
+          // Usar pngjs para ler a imagem e extrair chunks
+          const png = new PNG();
+          const chunks = [];
 
-        // Procurar por tIME (data de modificação)
-        const timeChunk = chunks.find(chunk => chunk.type === 'tIME');
-        if (timeChunk) {
-          const year = timeChunk.data.readUInt16BE(0);
-          const month = timeChunk.data.readUInt8(2);
-          const day = timeChunk.data.readUInt8(3);
-          const hour = timeChunk.data.readUInt8(4);
-          const minute = timeChunk.data.readUInt8(5);
-          const second = timeChunk.data.readUInt8(6);
-          const tIME = `${year}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')} ${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}:${second.toString().padStart(2, '0')}`;
-          exifData.createDate = exifData.createDate || tIME;
+          // Parsear a imagem e coletar chunks
+          png.parse(imageBuffer, (err) => {
+            if (err) {
+              console.error('[Validate-Media] Erro ao parsear PNG:', err.message);
+              return;
+            }
+          });
+
+          // Capturar chunks usando eventos do parser
+          const parser = new PNG();
+          parser.on('metadata', (metadata) => {
+            // Metadados básicos (largura, altura, etc.) não são necessários aqui
+          });
+          parser.on('parsed', () => {
+            // Não usamos os dados de pixel, apenas os chunks
+          });
+          parser.on('error', (err) => {
+            console.error('[Validate-Media] Erro ao parsear PNG:', err.message);
+          });
+
+          // Ler os chunks manualmente usando um parser de chunks
+          const chunkData = [];
+          let offset = 8; // Pular a assinatura PNG
+          while (offset < imageBuffer.length) {
+            const length = imageBuffer.readUInt32BE(offset);
+            const type = imageBuffer.slice(offset + 4, offset + 8).toString();
+            const data = imageBuffer.slice(offset + 8, offset + 8 + length);
+            chunkData.push({ name: type, data });
+            offset += 12 + length; // 4 bytes length + 4 bytes type + data + 4 bytes CRC
+          }
+
+          // Procurar por tIME (data de modificação)
+          const timeChunk = chunkData.find(chunk => chunk.name === 'tIME');
+          if (timeChunk) {
+            const data = timeChunk.data;
+            const year = data.readUInt16BE(0);
+            const month = data.readUInt8(2);
+            const day = data.readUInt8(3);
+            const hour = data.readUInt8(4);
+            const minute = data.readUInt8(5);
+            const second = data.readUInt8(6);
+            const tIME = `${year}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')} ${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}:${second.toString().padStart(2, '0')}`;
+            exifData.createDate = exifData.createDate || tIME;
+          }
+
+          // Procurar por Creation Time em tEXt ou iTXt
+          const textChunks = chunkData.filter(chunk => chunk.name === 'tEXt' || chunk.name === 'iTXt');
+          const creationTimeChunk = textChunks.find(chunk => {
+            const text = chunk.data.toString('utf8');
+            return text.includes('Creation Time');
+          });
+          if (creationTimeChunk) {
+            const text = creationTimeChunk.data.toString('utf8');
+            const creationTime = text.split('Creation Time\0')[1];
+            exifData.createDate = creationTime; // Prioridade para Creation Time
+          }
+
+          console.log('[Validate-Media] Metadados PNG extraídos:', { createDate: exifData.createDate });
+        } catch (error) {
+          console.error('[Validate-Media] Erro ao extrair metadados PNG:', error.message);
         }
-
-        // Procurar por Creation Time em tEXt ou iTXt
-        const creationTimeChunk = chunks.find(chunk => 
-          (chunk.type === 'tEXt' || chunk.type === 'iTXt') && 
-          chunk.data.toString().includes('Creation Time')
-        );
-        if (creationTimeChunk) {
-          const text = creationTimeChunk.data.toString();
-          const creationTime = text.split('Creation Time\0')[1];
-          exifData.createDate = creationTime; // Prioridade para Creation Time
-        }
-
-        console.log('[Validate-Media] Metadados PNG extraídos:', { createDate: exifData.createDate });
-      } catch (error) {
-        console.error('[Validate-Media] Erro ao extrair metadados PNG:', error.message);
+      } else {
+        console.log('[Validate-Media] Imagem não é PNG, pulando extração de metadados PNG.');
       }
     }
 
