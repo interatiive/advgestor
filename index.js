@@ -4,10 +4,10 @@ const fetch = require('node-fetch');
 const fs = require('fs').promises;
 const path = require('path');
 const axios = require('axios');
-const ExifReader = require('exifreader');
 const FormData = require('form-data');
 const { PNG } = require('pngjs');
 const crypto = require('crypto');
+const { exiftool } = require('exiftool-vendored');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -85,7 +85,7 @@ const sendMessageWithDelay = async ({ telefone, message }, delay) => {
   });
 };
 
-// Função para enviar dados pro Make (usada por "Dr. Eliah")
+// Função para enviar dados pro Make (usada por "Dr. Eliah" e pela rota /validate-media)
 async function sendToMake(data) {
   let retries = 3;
   while (retries > 0) {
@@ -98,7 +98,7 @@ async function sendToMake(data) {
       });
       if (response.ok) {
         console.log('Dados enviados pro Make com sucesso:', data);
-        break;
+        return true;
       } else {
         throw new Error(`Webhook respondeu com status ${response.status}`);
       }
@@ -107,11 +107,13 @@ async function sendToMake(data) {
       console.error(`Erro ao enviar pro Make (tentativa ${4 - retries}/3):`, error);
       if (retries === 0) {
         console.error('Falha ao enviar pro Make após 3 tentativas');
+        return false;
       } else {
         await new Promise(resolve => setTimeout(resolve, 2000 * (3 - retries)));
       }
     }
   }
+  return false;
 }
 
 // Rota para enviar mensagens (POST)
@@ -283,154 +285,127 @@ function generateHash(data) {
   return crypto.createHash('sha256').update(data).digest('hex');
 }
 
-// Função pra extrair metadados EXIF e PNG usando exifreader e pngjs
-function extractExif(imageBuffer) {
+// Função pra extrair metadados EXIF usando exiftool-vendored
+async function extractExif(imageBuffer) {
   try {
-    const tags = ExifReader.load(imageBuffer);
-    console.log(`[Validate-Media] Tags EXIF brutas:`, tags);
+    // Salvar o buffer temporariamente em um arquivo para usar com exiftool
+    const tempFilePath = path.join(__dirname, `temp-${Date.now()}.heic`);
+    await fs.writeFile(tempFilePath, imageBuffer);
+
+    // Extrair metadados com exiftool-vendored
+    const tags = await exiftool.read(tempFilePath);
+    console.log(`[Validate-Media] Tags brutas extraídas com exiftool:`, tags);
 
     // Converter coordenadas DMS para decimal, se disponíveis
     const getGpsCoordinate = (value, ref) => {
       if (!value || !ref) return null;
-      const degrees = value[0].numerator / value[0].denominator;
-      const minutes = value[1].numerator / value[1].denominator;
-      const seconds = value[2].numerator / value[2].denominator;
+      const degreesMatch = value.match(/(\d+)\s*deg/);
+      const minutesMatch = value.match(/(\d+\.?\d*)\s*'/);
+      const secondsMatch = value.match(/(\d+\.?\d*)\s*"/);
+      const degrees = degreesMatch ? parseFloat(degreesMatch[1]) : 0;
+      const minutes = minutesMatch ? parseFloat(minutesMatch[1]) : 0;
+      const seconds = secondsMatch ? parseFloat(secondsMatch[1]) : 0;
       let decimal = degrees + (minutes / 60) + (seconds / 3600);
       if (ref === 'S' || ref === 'W') decimal = -decimal;
       return decimal;
     };
 
-    // Tentar extrair metadados EXIF padrão
-    const gpsLatitude = tags['GPSLatitude'] && tags['GPSLatitudeRef']
-      ? getGpsCoordinate(tags['GPSLatitude'].value, tags['GPSLatitudeRef'].description)
+    // Tentar extrair metadados padrão
+    const gpsLatitude = tags.GPSLatitude && tags.GPSLatitudeRef
+      ? getGpsCoordinate(tags.GPSLatitude, tags.GPSLatitudeRef)
       : null;
-    const gpsLongitude = tags['GPSLongitude'] && tags['GPSLongitudeRef']
-      ? getGpsCoordinate(tags['GPSLongitude'].value, tags['GPSLongitudeRef'].description)
+    const gpsLongitude = tags.GPSLongitude && tags.GPSLongitudeRef
+      ? getGpsCoordinate(tags.GPSLongitude, tags.GPSLongitudeRef)
       : null;
 
     let exifData = {
-      createDate: null, // Inicialmente nulo
-      make: tags['Make']?.description || '',
-      model: tags['Model']?.description || '',
+      createDate: '',
+      make: tags.Make || '',
+      model: tags.Model || '',
+      software: tags.Software || '',
+      dateTimeOriginal: tags.DateTimeOriginal || '',
+      mccData: tags.MCCData || '',
       gps: gpsLatitude && gpsLongitude ? {
         latitude: gpsLatitude,
         longitude: gpsLongitude
       } : null
     };
 
-    // Prioridade para createDate: EXIF DateTimeOriginal > EXIF DateTime
-    if (tags['DateTimeOriginal']?.description) {
-      exifData.createDate = tags['DateTimeOriginal'].description;
-    } else if (tags['DateTime']?.description) {
-      exifData.createDate = tags['DateTime'].description;
+    // Prioridade para createDate: DateTimeOriginal > CreateDate
+    if (tags.DateTimeOriginal) {
+      exifData.createDate = tags.DateTimeOriginal;
+    } else if (tags.CreateDate) {
+      exifData.createDate = tags.CreateDate;
     }
 
-    // Se for uma imagem PNG ou não houver createDate em EXIF, tentar extrair metadados PNG
-    if (!exifData.createDate || tags['FileType']?.value === 'png') {
-      console.log('[Validate-Media] Imagem PNG ou sem createDate EXIF. Tentando extrair metadados PNG...');
-      
-      // Verificar se é uma imagem PNG válida
-      const isPng = imageBuffer.slice(0, 8).toString('hex') === '89504e470d0a1a0a'; // Assinatura PNG
-      if (isPng) {
-        try {
-          // Usar pngjs para ler a imagem e extrair chunks
-          const png = new PNG();
-          const chunks = [];
+    // Se for uma imagem PNG, tentar extrair metadados PNG adicionais
+    const isPng = imageBuffer.slice(0, 8).toString('hex') === '89504e470d0a1a0a'; // Assinatura PNG
+    if (isPng) {
+      console.log('[Validate-Media] Imagem PNG detectada. Tentando extrair metadados PNG...');
+      try {
+        const png = new PNG();
+        const chunks = [];
 
-          // Parsear a imagem e coletar chunks
-          png.parse(imageBuffer, (err) => {
-            if (err) {
-              console.error('[Validate-Media] Erro ao parsear PNG:', err.message);
-              return;
-            }
-          });
-
-          // Capturar chunks usando eventos do parser
-          const parser = new PNG();
-          parser.on('metadata', (metadata) => {
-            // Metadados básicos (largura, altura, etc.) não são necessários aqui
-          });
-          parser.on('parsed', () => {
-            // Não usamos os dados de pixel, apenas os chunks
-          });
-          parser.on('error', (err) => {
+        // Parsear a imagem e coletar chunks
+        png.parse(imageBuffer, (err) => {
+          if (err) {
             console.error('[Validate-Media] Erro ao parsear PNG:', err.message);
-          });
-
-          // Ler os chunks manualmente usando um parser de chunks
-          const chunkData = [];
-          let offset = 8; // Pular a assinatura PNG
-          while (offset < imageBuffer.length) {
-            const length = imageBuffer.readUInt32BE(offset);
-            const type = imageBuffer.slice(offset + 4, offset + 8).toString();
-            const data = imageBuffer.slice(offset + 8, offset + 8 + length);
-            chunkData.push({ name: type, data });
-            offset += 12 + length; // 4 bytes length + 4 bytes type + data + 4 bytes CRC
+            return;
           }
+        });
 
-          // Procurar por tIME (data de modificação)
-          const timeChunk = chunkData.find(chunk => chunk.name === 'tIME');
-          if (timeChunk) {
-            const data = timeChunk.data;
-            const year = data.readUInt16BE(0);
-            const month = data.readUInt8(2);
-            const day = data.readUInt8(3);
-            const hour = data.readUInt8(4);
-            const minute = data.readUInt8(5);
-            const second = data.readUInt8(6);
-            const tIME = `${year}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')} ${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}:${second.toString().padStart(2, '0')}`;
-            exifData.createDate = exifData.createDate || tIME;
-          }
-
-          // Procurar por Creation Time em tEXt ou iTXt
-          const textChunks = chunkData.filter(chunk => chunk.name === 'tEXt' || chunk.name === 'iTXt');
-          const creationTimeChunk = textChunks.find(chunk => {
-            const text = chunk.data.toString('utf8');
-            return text.includes('Creation Time');
-          });
-          if (creationTimeChunk) {
-            const text = creationTimeChunk.data.toString('utf8');
-            const creationTime = text.split('Creation Time\0')[1];
-            exifData.createDate = creationTime; // Prioridade para Creation Time
-          }
-
-          console.log('[Validate-Media] Metadados PNG extraídos:', { createDate: exifData.createDate });
-        } catch (error) {
-          console.error('[Validate-Media] Erro ao extrair metadados PNG:', error.message);
+        // Ler os chunks manualmente
+        const chunkData = [];
+        let offset = 8; // Pular a assinatura PNG
+        while (offset < imageBuffer.length) {
+          const length = imageBuffer.readUInt32BE(offset);
+          const type = imageBuffer.slice(offset + 4, offset + 8).toString();
+          const data = imageBuffer.slice(offset + 8, offset + 8 + length);
+          chunkData.push({ name: type, data });
+          offset += 12 + length; // 4 bytes length + 4 bytes type + data + 4 bytes CRC
         }
-      } else {
-        console.log('[Validate-Media] Imagem não é PNG, pulando extração de metadados PNG.');
+
+        // Procurar por tIME (data de modificação)
+        const timeChunk = chunkData.find(chunk => chunk.name === 'tIME');
+        if (timeChunk) {
+          const data = timeChunk.data;
+          const year = data.readUInt16BE(0);
+          const month = data.readUInt8(2);
+          const day = data.readUInt8(3);
+          const hour = data.readUInt8(4);
+          const minute = data.readUInt8(5);
+          const second = data.readUInt8(6);
+          const tIME = `${year}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')} ${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}:${second.toString().padStart(2, '0')}`;
+          exifData.createDate = exifData.createDate || tIME;
+        }
+
+        // Procurar por Creation Time em tEXt ou iTXt
+        const textChunks = chunkData.filter(chunk => chunk.name === 'tEXt' || chunk.name === 'iTXt');
+        const creationTimeChunk = textChunks.find(chunk => {
+          const text = chunk.data.toString('utf8');
+          return text.includes('Creation Time');
+        });
+        if (creationTimeChunk) {
+          const text = creationTimeChunk.data.toString('utf8');
+          const creationTime = text.split('Creation Time\0')[1];
+          exifData.createDate = creationTime; // Prioridade para Creation Time
+        }
+
+        console.log('[Validate-Media] Metadados PNG extraídos:', { createDate: exifData.createDate });
+      } catch (error) {
+        console.error('[Validate-Media] Erro ao extrair metadados PNG:', error.message);
       }
     }
 
-    // Tentar extrair metadados XMP, se disponíveis
-    if (!exifData.createDate && tags['XMP']) {
-      const xmpData = tags['XMP'].description;
-      console.log('[Validate-Media] Dados XMP encontrados:', xmpData);
-      const xmpDateMatch = xmpData.match(/<xmp:CreateDate>(.*?)<\/xmp:CreateDate>/);
-      const xmpCreatorMatch = xmpData.match(/<dc:creator>(.*?)<\/dc:creator>/);
-      if (xmpDateMatch) exifData.createDate = xmpDateMatch[1];
-      if (xmpCreatorMatch) exifData.make = xmpCreatorMatch[1] || exifData.make;
-    }
-
-    // Se createDate ainda estiver vazio, usar campos de texto alternativos
-    if (!exifData.createDate) {
-      const textFields = {};
-      for (const key in tags) {
-        if (key.startsWith('TextEntry_')) {
-          const textKey = tags[key].keyword || key;
-          const textValue = tags[key].value || '';
-          textFields[textKey] = textValue;
-        }
-      }
-      console.log('[Validate-Media] Campos de texto PNG (tEXt/iTXt):', textFields);
-      exifData.createDate = textFields['Creation Time'] || textFields['Date'] || '';
-    }
-
+    // Limpar o arquivo temporário
+    await fs.unlink(tempFilePath);
     return exifData;
   } catch (error) {
-    console.error('Erro ao extrair EXIF:', error.message);
-    return { createDate: '', make: '', model: '', gps: null };
+    console.error('Erro ao extrair metadados com exiftool:', error.message);
+    return { createDate: '', make: '', model: '', software: '', dateTimeOriginal: '', mccData: '', gps: null };
+  } finally {
+    // Garantir que o exiftool seja encerrado
+    await exiftool.end();
   }
 }
 
@@ -468,9 +443,9 @@ async function processSingleImage(imageUrl) {
     const hash = generateHash(imageBuffer);
     console.log(`[Validate-Media] Hash gerado: ${hash}`);
 
-    // Extrair metadados EXIF e PNG
-    const exif = extractExif(imageBuffer);
-    console.log(`[Validate-Media] Metadados EXIF/PNG:`, exif);
+    // Extrair metadados EXIF e outros
+    const exif = await extractExif(imageBuffer);
+    console.log(`[Validate-Media] Metadados extraídos:`, exif);
 
     // Verificar clareza
     const clarity = checkImageClarity(imageBuffer);
@@ -533,19 +508,36 @@ app.post('/validate-media', async (req, res) => {
     const failedResults = results.filter(result => !result.success);
 
     if (successfulResults.length === 0) {
-      return res.status(500).json({
+      const responseData = {
         error: 'Nenhuma imagem pôde ser processada',
         failed: failedResults
-      });
+      };
+      // Enviar para o Make mesmo em caso de falha total
+      await sendToMake(responseData);
+      return res.status(500).json(responseData);
     }
 
-    res.json({
+    // Preparar o JSON de resposta
+    const responseData = {
       images: successfulResults,
       failed: failedResults.length > 0 ? failedResults : undefined
-    });
+    };
+
+    // Enviar o resultado para o Make
+    const sentToMake = await sendToMake(responseData);
+    if (!sentToMake) {
+      console.error('[Validate-Media] Falha ao enviar resultado para o Make');
+      return res.status(500).json({ error: 'Erro ao enviar resultado para o Make' });
+    }
+
+    // Responder ao cliente
+    res.status(200).json({ message: 'Imagens processadas e resultado enviado ao Make com sucesso' });
   } catch (error) {
     console.error('[Validate-Media] Erro ao processar imagens:', error.message);
-    res.status(500).json({ error: 'Erro ao processar imagens', details: error.message });
+    const errorResponse = { error: 'Erro ao processar imagens', details: error.message };
+    // Enviar erro para o Make
+    await sendToMake(errorResponse);
+    res.status(500).json(errorResponse);
   }
 });
 
