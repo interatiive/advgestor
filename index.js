@@ -8,9 +8,13 @@ const FormData = require('form-data');
 const { PNG } = require('pngjs');
 const crypto = require('crypto');
 const { exiftool } = require('exiftool-vendored');
+const ExifReader = require('exifreader');
 
 const app = express();
 const port = process.env.PORT || 3000;
+
+// Verificar se o módulo crypto está disponível
+console.log('Módulo crypto carregado:', typeof crypto !== 'undefined' ? 'Sim' : 'Não');
 
 // Configurações
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
@@ -74,6 +78,11 @@ const sendMessageWithDelay = async ({ telefone, message }, delay) => {
     setTimeout(async () => {
       const cleanNumber = telefone.toString().replace(/[^0-9]/g, '');
       try {
+        if (!global.client) {
+          console.error('Erro: Cliente WhatsApp não está conectado.');
+          resolve({ success: false, number: cleanNumber, error: 'Cliente WhatsApp não está conectado.' });
+          return;
+        }
         const [result] = await global.client.onWhatsApp(`${cleanNumber}@s.whatsapp.net`);
         if (!result || !result.exists) {
           console.log(`Número ${cleanNumber} não está registrado no WhatsApp`);
@@ -133,19 +142,26 @@ app.post('/send', async (req, res) => {
       // Parsear o corpo bruto
       const body = cleanAndParseJSON(rawBody);
 
-      // Verificar se "dados" existe e parsear o JSON interno
-      if (!body.dados) {
-        console.error('Requisição inválida: campo "dados" não encontrado');
+      let messages = [];
+
+      // Verificar se o payload contém "dados" (formato antigo)
+      if (body.dados) {
+        const dadosParsed = cleanAndParseJSON(body.dados);
+        if (!dadosParsed.messages || !Array.isArray(dadosParsed.messages)) {
+          console.error('Requisição inválida: "messages" deve ser uma lista dentro de "dados"');
+          return res.status(400).send();
+        }
+        messages = dadosParsed.messages;
+      }
+      // Verificar se o payload contém "number" e "message" diretamente (novo formato do Make)
+      else if (body.number && body.message) {
+        messages = [{ telefone: body.number, message: body.message }];
+      }
+      else {
+        console.error('Requisição inválida: o payload deve conter "dados" ou os campos "number" e "message"');
         return res.status(400).send();
       }
 
-      const dadosParsed = cleanAndParseJSON(body.dados);
-      if (!dadosParsed.messages || !Array.isArray(dadosParsed.messages)) {
-        console.error('Requisição inválida: "messages" deve ser uma lista dentro de "dados"');
-        return res.status(400).send();
-      }
-
-      const messages = dadosParsed.messages;
       if (messages.length > MAX_MESSAGES_PER_REQUEST) {
         console.error(`Número de mensagens (${messages.length}) excede o limite de ${MAX_MESSAGES_PER_REQUEST}`);
         return res.status(400).send();
@@ -291,7 +307,7 @@ function generateHash(data) {
   return crypto.createHash('sha256').update(data).digest('hex');
 }
 
-// Função pra extrair metadados EXIF usando exiftool-vendored
+// Função pra extrair metadados EXIF usando exiftool-vendored e exifreader como fallback
 async function extractExif(imageBuffer) {
   try {
     // Salvar o buffer temporariamente em um arquivo para usar com exiftool
@@ -316,7 +332,7 @@ async function extractExif(imageBuffer) {
       return decimal;
     };
 
-    // Tentar extrair metadados padrão
+    // Tentar extrair metadados padrão com exiftool
     const gpsLatitude = tags.GPSLatitude && tags.GPSLatitudeRef
       ? getGpsCoordinate(tags.GPSLatitude, tags.GPSLatitudeRef)
       : null;
@@ -334,7 +350,8 @@ async function extractExif(imageBuffer) {
       gps: gpsLatitude && gpsLongitude ? {
         latitude: gpsLatitude,
         longitude: gpsLongitude
-      } : null
+      } : null,
+      warning: null
     };
 
     // Prioridade para createDate: DateTimeOriginal > CreateDate
@@ -342,6 +359,46 @@ async function extractExif(imageBuffer) {
       exifData.createDate = tags.DateTimeOriginal;
     } else if (tags.CreateDate) {
       exifData.createDate = tags.CreateDate;
+    }
+
+    // Verificar se os metadados principais estão vazios (exiftool)
+    let hasUsefulMetadata = exifData.createDate || exifData.make || exifData.model || exifData.software || exifData.dateTimeOriginal || exifData.gps;
+
+    // Se não houver metadados úteis, tentar com exifreader
+    if (!hasUsefulMetadata) {
+      console.log('[Validate-Media] Nenhum metadado útil encontrado com exiftool. Tentando com exifreader...');
+      try {
+        const exifReaderTags = await ExifReader.load(imageBuffer);
+        console.log('[Validate-Media] Tags brutas extraídas com exifreader:', exifReaderTags);
+
+        exifData.make = exifReaderTags['Make']?.description || exifData.make;
+        exifData.model = exifReaderTags['Model']?.description || exifData.model;
+        exifData.software = exifReaderTags['Software']?.description || exifData.software;
+        exifData.dateTimeOriginal = exifReaderTags['DateTimeOriginal']?.description || exifData.dateTimeOriginal;
+        exifData.createDate = exifReaderTags['DateTimeOriginal']?.description || exifData.createDate;
+
+        const gpsLat = exifReaderTags['GPSLatitude']?.description;
+        const gpsLatRef = exifReaderTags['GPSLatitudeRef']?.description;
+        const gpsLon = exifReaderTags['GPSLongitude']?.description;
+        const gpsLonRef = exifReaderTags['GPSLongitudeRef']?.description;
+        if (gpsLat && gpsLatRef && gpsLon && gpsLonRef) {
+          const lat = parseFloat(gpsLat);
+          const lon = parseFloat(gpsLon);
+          exifData.gps = {
+            latitude: gpsLatRef === 'S' ? -lat : lat,
+            longitude: gpsLonRef === 'W' ? -lon : lon
+          };
+        }
+      } catch (error) {
+        console.error('[Validate-Media] Erro ao extrair metadados com exifreader:', error.message);
+      }
+    }
+
+    // Verificar novamente se há metadados úteis
+    hasUsefulMetadata = exifData.createDate || exifData.make || exifData.model || exifData.software || exifData.dateTimeOriginal || exifData.gps;
+    if (!hasUsefulMetadata) {
+      console.log('[Validate-Media] Aviso: Nenhum metadado útil encontrado na imagem (ex.: createDate, make, model, gps).');
+      exifData.warning = 'Nenhum metadado útil encontrado na imagem (ex.: data de criação, fabricante, modelo, localização). A imagem pode ter sido processada ou não contém metadados EXIF.';
     }
 
     // Se for uma imagem PNG, tentar extrair metadados PNG adicionais
@@ -408,7 +465,7 @@ async function extractExif(imageBuffer) {
     return exifData;
   } catch (error) {
     console.error('Erro ao extrair metadados com exiftool:', error.message);
-    return { createDate: '', make: '', model: '', software: '', dateTimeOriginal: '', mccData: '', gps: null };
+    return { createDate: '', make: '', model: '', software: '', dateTimeOriginal: '', mccData: '', gps: null, warning: 'Erro ao extrair metadados: ' + error.message };
   } finally {
     // Garantir que o exiftool seja encerrado
     await exiftool.end();
