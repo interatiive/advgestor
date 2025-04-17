@@ -574,7 +574,7 @@ setInterval(cleanupExpiredSenders, CLEANUP_INTERVAL);
 // Função para "pingar" a si mesmo
 let keepAliveFailures = 0;
 const keepAlive = async () => {
-  const url = 'https://whatsapp-api-render-pqn2.onrender.com/ping';
+  const url = 'https://advgestor.onrender.com/ping';
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
