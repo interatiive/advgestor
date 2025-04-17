@@ -14,7 +14,8 @@
     "image-size": "^1.1.1",
     "node-fetch": "^2.7.0",
     "exifreader": "^4.13.0",
-    "pngjs": "^6.0.0"
+    "pngjs": "^6.0.0",
+    "exiftool-vendored": "^12.70.0"
   },
   "engines": {
     "node": ">=16.0.0"
