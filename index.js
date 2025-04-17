@@ -307,11 +307,44 @@ function generateHash(data) {
   return crypto.createHash('sha256').update(data).digest('hex');
 }
 
+// Função pra determinar a extensão do arquivo com base no tipo de imagem
+function getFileExtension(imageBuffer) {
+  const signatures = {
+    '89504e470d0a1a0a': 'png', // PNG
+    'ffd8ff': 'jpg', // JPEG
+    '6674797068656963': 'heic', // HEIC (ftypheic)
+    '47494638': 'gif', // GIF
+    '52494646': 'webp' // WEBP (RIFF)
+  };
+
+  const header = imageBuffer.slice(0, 8).toString('hex');
+  for (const [signature, ext] of Object.entries(signatures)) {
+    if (header.startsWith(signature)) {
+      return ext;
+    }
+  }
+  return 'unknown'; // Extensão padrão se o tipo não for identificado
+}
+
 // Função pra extrair metadados EXIF usando exiftool-vendored e exifreader como fallback
 async function extractExif(imageBuffer) {
+  let exifData = {
+    createDate: '',
+    make: '',
+    model: '',
+    software: '',
+    dateTimeOriginal: '',
+    mccData: '',
+    gps: null,
+    warning: null
+  };
+
+  // Determinar a extensão correta do arquivo temporário
+  const fileExt = getFileExtension(imageBuffer);
+  const tempFilePath = path.join(__dirname, `temp-${Date.now()}.${fileExt}`);
+
   try {
     // Salvar o buffer temporariamente em um arquivo para usar com exiftool
-    const tempFilePath = path.join(__dirname, `temp-${Date.now()}.heic`);
     await fs.writeFile(tempFilePath, imageBuffer);
 
     // Extrair metadados com exiftool-vendored
@@ -340,19 +373,15 @@ async function extractExif(imageBuffer) {
       ? getGpsCoordinate(tags.GPSLongitude, tags.GPSLongitudeRef)
       : null;
 
-    let exifData = {
-      createDate: '',
-      make: tags.Make || '',
-      model: tags.Model || '',
-      software: tags.Software || '',
-      dateTimeOriginal: tags.DateTimeOriginal || '',
-      mccData: tags.MCCData || '',
-      gps: gpsLatitude && gpsLongitude ? {
-        latitude: gpsLatitude,
-        longitude: gpsLongitude
-      } : null,
-      warning: null
-    };
+    exifData.make = tags.Make || '';
+    exifData.model = tags.Model || '';
+    exifData.software = tags.Software || '';
+    exifData.dateTimeOriginal = tags.DateTimeOriginal || '';
+    exifData.mccData = tags.MCCData || '';
+    exifData.gps = gpsLatitude && gpsLongitude ? {
+      latitude: gpsLatitude,
+      longitude: gpsLongitude
+    } : null;
 
     // Prioridade para createDate: DateTimeOriginal > CreateDate
     if (tags.DateTimeOriginal) {
@@ -360,116 +389,121 @@ async function extractExif(imageBuffer) {
     } else if (tags.CreateDate) {
       exifData.createDate = tags.CreateDate;
     }
-
-    // Verificar se os metadados principais estão vazios (exiftool)
-    let hasUsefulMetadata = exifData.createDate || exifData.make || exifData.model || exifData.software || exifData.dateTimeOriginal || exifData.gps;
-
-    // Se não houver metadados úteis, tentar com exifreader
-    if (!hasUsefulMetadata) {
-      console.log('[Validate-Media] Nenhum metadado útil encontrado com exiftool. Tentando com exifreader...');
-      try {
-        const exifReaderTags = await ExifReader.load(imageBuffer);
-        console.log('[Validate-Media] Tags brutas extraídas com exifreader:', exifReaderTags);
-
-        exifData.make = exifReaderTags['Make']?.description || exifData.make;
-        exifData.model = exifReaderTags['Model']?.description || exifData.model;
-        exifData.software = exifReaderTags['Software']?.description || exifData.software;
-        exifData.dateTimeOriginal = exifReaderTags['DateTimeOriginal']?.description || exifData.dateTimeOriginal;
-        exifData.createDate = exifReaderTags['DateTimeOriginal']?.description || exifData.createDate;
-
-        const gpsLat = exifReaderTags['GPSLatitude']?.description;
-        const gpsLatRef = exifReaderTags['GPSLatitudeRef']?.description;
-        const gpsLon = exifReaderTags['GPSLongitude']?.description;
-        const gpsLonRef = exifReaderTags['GPSLongitudeRef']?.description;
-        if (gpsLat && gpsLatRef && gpsLon && gpsLonRef) {
-          const lat = parseFloat(gpsLat);
-          const lon = parseFloat(gpsLon);
-          exifData.gps = {
-            latitude: gpsLatRef === 'S' ? -lat : lat,
-            longitude: gpsLonRef === 'W' ? -lon : lon
-          };
-        }
-      } catch (error) {
-        console.error('[Validate-Media] Erro ao extrair metadados com exifreader:', error.message);
-      }
-    }
-
-    // Verificar novamente se há metadados úteis
-    hasUsefulMetadata = exifData.createDate || exifData.make || exifData.model || exifData.software || exifData.dateTimeOriginal || exifData.gps;
-    if (!hasUsefulMetadata) {
-      console.log('[Validate-Media] Aviso: Nenhum metadado útil encontrado na imagem (ex.: createDate, make, model, gps).');
-      exifData.warning = 'Nenhum metadado útil encontrado na imagem (ex.: data de criação, fabricante, modelo, localização). A imagem pode ter sido processada ou não contém metadados EXIF.';
-    }
-
-    // Se for uma imagem PNG, tentar extrair metadados PNG adicionais
-    const isPng = imageBuffer.slice(0, 8).toString('hex') === '89504e470d0a1a0a'; // Assinatura PNG
-    if (isPng) {
-      console.log('[Validate-Media] Imagem PNG detectada. Tentando extrair metadados PNG...');
-      try {
-        const png = new PNG();
-        const chunks = [];
-
-        // Parsear a imagem e coletar chunks
-        png.parse(imageBuffer, (err) => {
-          if (err) {
-            console.error('[Validate-Media] Erro ao parsear PNG:', err.message);
-            return;
-          }
-        });
-
-        // Ler os chunks manualmente
-        const chunkData = [];
-        let offset = 8; // Pular a assinatura PNG
-        while (offset < imageBuffer.length) {
-          const length = imageBuffer.readUInt32BE(offset);
-          const type = imageBuffer.slice(offset + 4, offset + 8).toString();
-          const data = imageBuffer.slice(offset + 8, offset + 8 + length);
-          chunkData.push({ name: type, data });
-          offset += 12 + length; // 4 bytes length + 4 bytes type + data + 4 bytes CRC
-        }
-
-        // Procurar por tIME (data de modificação)
-        const timeChunk = chunkData.find(chunk => chunk.name === 'tIME');
-        if (timeChunk) {
-          const data = timeChunk.data;
-          const year = data.readUInt16BE(0);
-          const month = data.readUInt8(2);
-          const day = data.readUInt8(3);
-          const hour = data.readUInt8(4);
-          const minute = data.readUInt8(5);
-          const second = data.readUInt8(6);
-          const tIME = `${year}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')} ${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}:${second.toString().padStart(2, '0')}`;
-          exifData.createDate = exifData.createDate || tIME;
-        }
-
-        // Procurar por Creation Time em tEXt ou iTXt
-        const textChunks = chunkData.filter(chunk => chunk.name === 'tEXt' || chunk.name === 'iTXt');
-        const creationTimeChunk = textChunks.find(chunk => {
-          const text = chunk.data.toString('utf8');
-          return text.includes('Creation Time');
-        });
-        if (creationTimeChunk) {
-          const text = creationTimeChunk.data.toString('utf8');
-          const creationTime = text.split('Creation Time\0')[1];
-          exifData.createDate = creationTime; // Prioridade para Creation Time
-        }
-
-        console.log('[Validate-Media] Metadados PNG extraídos:', { createDate: exifData.createDate });
-      } catch (error) {
-        console.error('[Validate-Media] Erro ao extrair metadados PNG:', error.message);
-      }
-    }
-
-    // Limpar o arquivo temporário
-    await fs.unlink(tempFilePath);
-    return exifData;
   } catch (error) {
     console.error('Erro ao extrair metadados com exiftool:', error.message);
-    return { createDate: '', make: '', model: '', software: '', dateTimeOriginal: '', mccData: '', gps: null, warning: 'Erro ao extrair metadados: ' + error.message };
+    exifData.warning = `Erro ao extrair metadados com exiftool: ${error.message}`;
   } finally {
-    // Garantir que o exiftool seja encerrado
-    await exiftool.end();
+    // Limpar o arquivo temporário
+    try {
+      await fs.unlink(tempFilePath);
+    } catch (error) {
+      console.error(`Erro ao deletar arquivo temporário ${tempFilePath}:`, error.message);
+    }
   }
+
+  // Verificar se os metadados principais estão vazios
+  let hasUsefulMetadata = exifData.createDate || exifData.make || exifData.model || exifData.software || exifData.dateTimeOriginal || exifData.gps;
+
+  // Se não houver metadados úteis ou se houve erro no exiftool, tentar com exifreader
+  if (!hasUsefulMetadata || exifData.warning) {
+    console.log('[Validate-Media] Tentando extrair metadados com exifreader...');
+    try {
+      const exifReaderTags = await ExifReader.load(imageBuffer);
+      console.log('[Validate-Media] Tags brutas extraídas com exifreader:', exifReaderTags);
+
+      exifData.make = exifReaderTags['Make']?.description || exifData.make;
+      exifData.model = exifReaderTags['Model']?.description || exifData.model;
+      exifData.software = exifReaderTags['Software']?.description || exifData.software;
+      exifData.dateTimeOriginal = exifReaderTags['DateTimeOriginal']?.description || exifData.dateTimeOriginal;
+      exifData.createDate = exifReaderTags['DateTimeOriginal']?.description || exifData.createDate;
+
+      const gpsLat = exifReaderTags['GPSLatitude']?.description;
+      const gpsLatRef = exifReaderTags['GPSLatitudeRef']?.description;
+      const gpsLon = exifReaderTags['GPSLongitude']?.description;
+      const gpsLonRef = exifReaderTags['GPSLongitudeRef']?.description;
+      if (gpsLat && gpsLatRef && gpsLon && gpsLonRef) {
+        const lat = parseFloat(gpsLat);
+        const lon = parseFloat(gpsLon);
+        exifData.gps = {
+          latitude: gpsLatRef === 'S' ? -lat : lat,
+          longitude: gpsLonRef === 'W' ? -lon : lon
+        };
+      }
+    } catch (error) {
+      console.error('[Validate-Media] Erro ao extrair metadados com exifreader:', error.message);
+      exifData.warning = exifData.warning
+        ? `${exifData.warning} | Erro com exifreader: ${error.message}`
+        : `Erro ao extrair metadados com exifreader: ${error.message}`;
+    }
+  }
+
+  // Verificar novamente se há metadados úteis
+  hasUsefulMetadata = exifData.createDate || exifData.make || exifData.model || exifData.software || exifData.dateTimeOriginal || exifData.gps;
+  if (!hasUsefulMetadata && !exifData.warning) {
+    console.log('[Validate-Media] Aviso: Nenhum metadado útil encontrado na imagem (ex.: createDate, make, model, gps).');
+    exifData.warning = 'Nenhum metadado útil encontrado na imagem (ex.: data de criação, fabricante, modelo, localização). A imagem pode ter sido processada ou não contém metadados EXIF.';
+  }
+
+  // Se for uma imagem PNG, tentar extrair metadados PNG adicionais
+  const isPng = imageBuffer.slice(0, 8).toString('hex') === '89504e470d0a1a0a'; // Assinatura PNG
+  if (isPng) {
+    console.log('[Validate-Media] Imagem PNG detectada. Tentando extrair metadados PNG...');
+    try {
+      const png = new PNG();
+      const chunks = [];
+
+      // Parsear a imagem e coletar chunks
+      png.parse(imageBuffer, (err) => {
+        if (err) {
+          console.error('[Validate-Media] Erro ao parsear PNG:', err.message);
+          return;
+        }
+      });
+
+      // Ler os chunks manualmente
+      const chunkData = [];
+      let offset = 8; // Pular a assinatura PNG
+      while (offset < imageBuffer.length) {
+        const length = imageBuffer.readUInt32BE(offset);
+        const type = imageBuffer.slice(offset + 4, offset + 8).toString();
+        const data = imageBuffer.slice(offset + 8, offset + 8 + length);
+        chunkData.push({ name: type, data });
+        offset += 12 + length; // 4 bytes length + 4 bytes type + data + 4 bytes CRC
+      }
+
+      // Procurar por tIME (data de modificação)
+      const timeChunk = chunkData.find(chunk => chunk.name === 'tIME');
+      if (timeChunk) {
+        const data = timeChunk.data;
+        const year = data.readUInt16BE(0);
+        const month = data.readUInt8(2);
+        const day = data.readUInt8(3);
+        const hour = data.readUInt8(4);
+        const minute = data.readUInt8(5);
+        const second = data.readUInt8(6);
+        const tIME = `${year}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')} ${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}:${second.toString().padStart(2, '0')}`;
+        exifData.createDate = exifData.createDate || tIME;
+      }
+
+      // Procurar por Creation Time em tEXt ou iTXt
+      const textChunks = chunkData.filter(chunk => chunk.name === 'tEXt' || chunk.name === 'iTXt');
+      const creationTimeChunk = textChunks.find(chunk => {
+        const text = chunk.data.toString('utf8');
+        return text.includes('Creation Time');
+      });
+      if (creationTimeChunk) {
+        const text = creationTimeChunk.data.toString('utf8');
+        const creationTime = text.split('Creation Time\0')[1];
+        exifData.createDate = creationTime; // Prioridade para Creation Time
+      }
+
+      console.log('[Validate-Media] Metadados PNG extraídos:', { createDate: exifData.createDate });
+    } catch (error) {
+      console.error('[Validate-Media] Erro ao extrair metadados PNG:', error.message);
+    }
+  }
+
+  return exifData;
 }
 
 // Função pra verificar clareza da imagem (resolução mínima)
@@ -614,7 +648,7 @@ app.use((err, req, res, next) => {
 });
 
 // Inicia o servidor
-app.listen(port, '0.0.0.0', () => {
+const server = app.listen(port, '0.0.0.0', () => {
   console.log(`Servidor rodando na porta ${port}`);
 });
 
@@ -655,3 +689,22 @@ const keepAlive = async () => {
 };
 
 setInterval(keepAlive, KEEP_ALIVE_INTERVAL);
+
+// Encerrar o exiftool quando o servidor for desligado
+process.on('SIGINT', async () => {
+  console.log('Encerrando o servidor e o exiftool...');
+  await exiftool.end();
+  server.close(() => {
+    console.log('Servidor encerrado.');
+    process.exit(0);
+  });
+});
+
+process.on('SIGTERM', async () => {
+  console.log('Encerrando o servidor e o exiftool...');
+  await exiftool.end();
+  server.close(() => {
+    console.log('Servidor encerrado.');
+    process.exit(0);
+  });
+});
