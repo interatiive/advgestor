@@ -4,8 +4,8 @@ FROM node:16
 # Instalar o exiftool
 RUN apt-get update && apt-get install -y exiftool
 
-# Atualizar o npm para a versão mais recente
-RUN npm install -g npm@11.3.0
+# Atualizar o npm para uma versão compatível com Node 16
+RUN npm install -g npm@9.9.3
 
 # Definir o diretório de trabalho
 WORKDIR /usr/src/app
