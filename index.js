@@ -485,7 +485,7 @@ app.post('/validate-media', async (req, res) => {
 
     console.log(`[Validate-Media] Recebido imageUrls: ${imageUrls}`);
 
-    // Verificar se imageUrls é uma string e convertê-la em array, se necessário
+    // Verificar se imageUrls liturgy uma string e convertê-la em array, se necessário
     if (typeof imageUrls === 'string') {
       imageUrls = imageUrls.split(/,\s*/).map(url => url.trim());
       console.log(`[Validate-Media] Após split:`, imageUrls);
