@@ -14,6 +14,7 @@ const port = process.env.PORT || 3000;
 
 // Configurações
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
+const KEEP_ALIVE_URL = process.env.KEEP_ALIVE_URL;
 const KEEP_ALIVE_INTERVAL = 14 * 60 * 1000; // 14 minutos
 const FETCH_TIMEOUT = 10_000; // 10 segundos
 const MESSAGE_TIMEOUT = 30 * 60 * 1000; // 30 minutos em milissegundos
@@ -22,9 +23,14 @@ const MIN_DELAY = 25_000; // 25 segundos em milissegundos
 const MAX_DELAY = 30_000; // 30 segundos em milissegundos
 const MAX_MESSAGES_PER_REQUEST = 50; // Limite máximo de mensagens por requisição
 
-// Verificar se o WEBHOOK_URL está definido
+// Verificar se as variáveis de ambiente estão definidas
 if (!WEBHOOK_URL) {
   console.error('Erro: A variável de ambiente WEBHOOK_URL não está definida. Configure-a no Render.');
+  process.exit(1);
+}
+
+if (!KEEP_ALIVE_URL) {
+  console.error('Erro: A variável de ambiente KEEP_ALIVE_URL não está definida. Configure-a no Render.');
   process.exit(1);
 }
 
@@ -574,11 +580,10 @@ setInterval(cleanupExpiredSenders, CLEANUP_INTERVAL);
 // Função para "pingar" a si mesmo
 let keepAliveFailures = 0;
 const keepAlive = async () => {
-  const url = 'https://advgestor.onrender.com/ping';
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
-    const response = await fetch(url, { signal: controller.signal });
+    const response = await fetch(KEEP_ALIVE_URL, { signal: controller.signal });
     clearTimeout(timeoutId);
     const text = await response.text();
     console.log(`Keep-alive ping: ${text}`);
