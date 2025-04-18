@@ -1,12 +1,13 @@
 {
   "name": "advgestor",
   "version": "1.0.0",
-  "description": "Serviço para integração com Datajud e WhatsApp",
+  "description": "Serviço para integração com WhatsApp e Datajud",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
+    "@adiwajshing/baileys": "^6.7.7",
     "axios": "^1.7.2",
     "express": "^4.19.2",
     "node-cron": "^3.0.3",
