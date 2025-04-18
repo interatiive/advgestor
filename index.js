@@ -1,56 +1,98 @@
 const express = require('express');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('baileys');
 const fetch = require('node-fetch');
+const fs = require('fs').promises;
+const path = require('path');
 const axios = require('axios');
-const cron = require('node-cron');
+const FormData = require('form-data');
+const { PNG } = require('pngjs');
+const crypto = require('crypto');
+const { exiftool } = require('exiftool-vendored');
 
 const app = express();
 const port = process.env.PORT || 3000;
 
 // Configurações
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
-const DATAJUD_API_KEY = process.env.DATAJUD_API_KEY;
-const DATAJUD_TRIBUNAL = process.env.DATAJUD_TRIBUNAL || 'tjba';
-const ADVOCATE_NAME = process.env.ADVOCATE_NAME;
-const EVOLUTION_API_URL = process.env.EVOLUTION_API_URL;
-const EVOLUTION_API_KEY = process.env.EVOLUTION_API_KEY;
-const FETCH_TIMEOUT = 10_000;
+const KEEP_ALIVE_URL = process.env.KEEP_ALIVE_URL;
 const KEEP_ALIVE_INTERVAL = 14 * 60 * 1000; // 14 minutos
-const KEEP_ALIVE_URL = process.env.KEEP_ALIVE_URL || `https://advgestor.onrender.com/ping`;
+const FETCH_TIMEOUT = 10_000; // 10 segundos
+const MESSAGE_TIMEOUT = 30 * 60 * 1000; // 30 minutos em milissegundos
+const CLEANUP_INTERVAL = 5 * 60 * 1000; // 5 minutos em milissegundos
+const MIN_DELAY = 25_000; // 25 segundos em milissegundos
+const MAX_DELAY = 30_000; // 30 segundos em milissegundos
+const MAX_MESSAGES_PER_REQUEST = 50; // Limite máximo de mensagens por requisição
 
-// Controle de busca de publicações
-let publicationCheck = { date: null, completed: false };
-let isCheckingPublications = false;
+// Verificar se as variáveis de ambiente estão definidas
+if (!WEBHOOK_URL) {
+  console.error('Erro: A variável de ambiente WEBHOOK_URL não está definida. Configure-a no Render.');
+  process.exit(1);
+}
 
-// Manipulação de SIGTERM
-let server;
-process.on('SIGTERM', () => {
-  console.log('Recebido SIGTERM. Encerrando servidor...');
-  if (server) {
-    server.close(() => {
-      console.log('Servidor encerrado com sucesso');
-      process.exit(0);
-    });
-  } else {
-    console.log('Nenhum servidor ativo para encerrar');
-    process.exit(0);
+if (!KEEP_ALIVE_URL) {
+  console.error('Erro: A variável de ambiente KEEP_ALIVE_URL não está definida. Configure-a no Render.');
+  process.exit(1);
+}
+
+// Armazenamento em memória dos números liberados
+const allowedSenders = new Map();
+
+// Middleware pra parsear JSON em rotas que não sejam /send
+app.use((req, res, next) => {
+  if (req.path === '/send' && req.method === 'POST') {
+    return next();
   }
+  return express.json()(req, res, next);
 });
 
-// Verificar variáveis de ambiente
-console.log('Verificando variáveis de ambiente...');
-if (!WEBHOOK_URL) throw new Error('WEBHOOK_URL não definida');
-if (!DATAJUD_API_KEY) throw new Error('DATAJUD_API_KEY não definida');
-if (!ADVOCATE_NAME) throw new Error('ADVOCATE_NAME não definida');
-if (!EVOLUTION_API_URL) throw new Error('EVOLUTION_API_URL não definida');
-if (!EVOLUTION_API_KEY) throw new Error('EVOLUTION_API_KEY não definida');
-console.log('Variáveis de ambiente OK');
+// Middleware pra URL-encoded (pra /validate-media)
+app.use(express.urlencoded({ extended: true }));
 
-// Middleware
-app.use(express.json());
+// Função para limpar e corrigir JSON
+const cleanAndParseJSON = (data) => {
+  try {
+    if (typeof data === 'object' && data !== null) {
+      return data;
+    }
+    let jsonString = typeof data === 'string' ? data : JSON.stringify(data);
+    const firstBrace = jsonString.indexOf('{');
+    const lastBrace = jsonString.lastIndexOf('}');
+    if (firstBrace === -1 || lastBrace === -1 || firstBrace > lastBrace) {
+      throw new Error('JSON inválido: não contém chaves {}');
+    }
+    jsonString = jsonString.substring(firstBrace, lastBrace + 1).trim().replace(/'/g, '"');
+    return JSON.parse(jsonString);
+  } catch (error) {
+    console.error('Erro ao limpar e parsear JSON:', error);
+    throw error;
+  }
+};
 
-// Função para enviar dados ao Make
+// Função para enviar mensagem com delay
+const sendMessageWithDelay = async ({ telefone, message }, delay) => {
+  return new Promise((resolve) => {
+    setTimeout(async () => {
+      const cleanNumber = telefone.toString().replace(/[^0-9]/g, '');
+      try {
+        const [result] = await global.client.onWhatsApp(`${cleanNumber}@s.whatsapp.net`);
+        if (!result || !result.exists) {
+          console.log(`Número ${cleanNumber} não está registrado no WhatsApp`);
+          resolve({ success: false, number: cleanNumber, error: 'Número não registrado no WhatsApp' });
+          return;
+        }
+        const sentMessage = await global.client.sendMessage(`${cleanNumber}@s.whatsapp.net`, { text: message, linkPreview: false }, { timeout: 60_000 });
+        console.log(`Mensagem enviada com sucesso para: ${cleanNumber}`, sentMessage);
+        resolve({ success: true, number: cleanNumber });
+      } catch (error) {
+        console.error(`Erro ao enviar mensagem para ${cleanNumber}:`, error);
+        resolve({ success: false, number: cleanNumber, error: error.message });
+      }
+    }, delay);
+  });
+};
+
+// Função para enviar dados pro Make (usada por "Dr. Eliah" e pela rota /validate-media)
 async function sendToMake(data) {
-  console.log('Enviando ao Make:', data);
   let retries = 3;
   while (retries > 0) {
     try {
@@ -61,222 +103,498 @@ async function sendToMake(data) {
         timeout: FETCH_TIMEOUT,
       });
       if (response.ok) {
-        console.log('Dados enviados ao Make com sucesso');
+        console.log('Dados enviados pro Make com sucesso:', data);
         return true;
+      } else {
+        throw new Error(`Webhook respondeu com status ${response.status}`);
       }
-      console.error(`Erro no Make: Status ${response.status}`);
-      throw new Error(`Status ${response.status}`);
     } catch (error) {
       retries--;
-      console.error(`Erro ao enviar ao Make (tentativa ${4 - retries}/3):`, error.message);
-      if (retries === 0) return false;
-      await new Promise(resolve => setTimeout(resolve, 2000 * (3 - retries)));
+      console.error(`Erro ao enviar pro Make (tentativa ${4 - retries}/3):`, error);
+      if (retries === 0) {
+        console.error('Falha ao enviar pro Make após 3 tentativas');
+        return false;
+      } else {
+        await new Promise(resolve => setTimeout(resolve, 2000 * (3 - retries)));
+      }
     }
   }
   return false;
 }
 
-// Função para classificar tipo de publicação
-function classifyPublicationType(movement) {
-  if (!movement) return 'Outros';
-  movement = movement.toLowerCase();
-  if (movement.includes('intima')) return 'Intimação';
-  if (movement.includes('despacho')) return 'Despacho';
-  if (movement.includes('decis')) return 'Decisão';
-  if (movement.includes('sentença')) return 'Sentença';
-  return 'Outros';
-}
-
-// Função para buscar publicações com paginação
-async function fetchDatajudPublications(dateRange = { gte: 'now/d', lte: 'now/d' }) {
-  if (isCheckingPublications) {
-    console.log('Busca de publicações já em andamento, ignorando...');
-    return [];
-  }
-  isCheckingPublications = true;
-
-  const currentDate = new Date().toISOString().split('T')[0];
-  if (publicationCheck.date !== currentDate) {
-    publicationCheck = { date: null, completed: false }; // Reset ao mudar de dia
-  }
-  if (publicationCheck.completed) {
-    console.log('Publicações já enviadas hoje, ignorando busca');
-    isCheckingPublications = false;
-    return [];
-  }
-
-  let allPublications = [];
-  let from = 0;
-  const size = 10;
-  const maxPages = 10;
-
-  const endpoint = `https://api-publica.datajud.cnj.jus.br/api_publica_${DATAJUD_TRIBUNAL}/_search`;
-
-  try {
-    while (from < maxPages * size) {
-      console.log(`Buscando página ${(from / size) + 1} para data ${dateRange.gte}...`);
-      const requestBody = {
-        query: {
-          bool: {
-            filter: [
-              {
-                range: {
-                  dataPublicacao: dateRange
-                }
-              }
-            ],
-            must: [
-              {
-                query_string: {
-                  query: `"${ADVOCATE_NAME}"`,
-                  fields: ['textoPublicacao']
-                }
-              }
-            ]
-          }
-        },
-        from,
-        size,
-        _source: ['id', 'orgaoJulgador.nome', 'movimentos.nome', 'dataPublicacao', 'grau', 'classeProcessual.nome']
-      };
-
-      const response = await axios.post(endpoint, requestBody, {
-        headers: {
-          'Authorization': `APIKey ${DATAJUD_API_KEY}`,
-          'Content-Type': 'application/json'
-        },
-        timeout: FETCH_TIMEOUT
-      });
-
-      if (response.status !== 200) {
-        console.error(`Erro na API do Datajud: Status ${response.status}`);
-        break;
-      }
-
-      const publications = response.data.hits.hits.map(hit => ({
-        numeroProcesso: hit._source.id || 'Desconhecido',
-        tipoPublicacao: classifyPublicationType(hit._source.movimentos?.nome),
-        orgaoJulgador: hit._source.orgaoJulgador?.nome || 'Desconhecido',
-        dataPublicacao: hit._source.dataPublicacao || dateRange.gte,
-        grau: hit._source.grau || 'Desconhecido',
-        classeProcessual: hit._source.classeProcessual?.nome || 'Desconhecida'
-      }));
-
-      allPublications.push(...publications);
-      console.log(`Página ${(from / size) + 1}: ${publications.length} publicações`);
-
-      if (publications.length < size) break;
-      from += size;
-    }
-
-    console.log(`Total de publicações encontradas: ${allPublications.length}`);
-
-    let allSent = true;
-    for (const pub of allPublications) {
-      const success = await sendToMake(pub);
-      if (!success) {
-        console.error(`Falha ao enviar publicação: ${JSON.stringify(pub)}`);
-        allSent = false;
-      }
-      await new Promise(resolve => setTimeout(resolve, 5000)); // 5 segundos
-    }
-
-    if (allSent && allPublications.length > 0) {
-      publicationCheck = { date: currentDate, completed: true };
-      console.log('Busca concluída com sucesso, publicationCheck atualizado:', publicationCheck);
-    }
-
-    return allPublications;
-  } catch (error) {
-    console.error('Erro ao buscar publicações:', error.message);
-    return [];
-  } finally {
-    isCheckingPublications = false;
-  }
-}
-
-// Rota de teste para Datajud
-app.get('/test-fetch-publications', async (req, res) => {
-  console.log('Iniciando teste de busca de publicações no TJBA para 2025-04-16');
-  try {
-    const publications = await fetchDatajudPublications({ gte: '2025-04-16', lte: '2025-04-16' });
-    res.status(200).json({
-      message: `Encontradas ${publications.length} publicações para 2025-04-16`,
-      publications,
-      sentToMake: publicationCheck.completed
-    });
-  } catch (error) {
-    console.error('Erro no teste:', error.message);
-    res.status(500).json({ error: 'Erro ao buscar publicações' });
-  }
-});
-
-// Rota para obter QR code do WhatsApp via Evolution API
-app.get('/qrcode', async (req, res) => {
-  console.log('Solicitando QR code da Evolution API...');
-  try {
-    const response = await axios.get(`${EVOLUTION_API_URL}/instance/connect`, {
-      headers: { 'apikey': EVOLUTION_API_KEY }
-    });
-    console.log('QR code obtido com sucesso');
-    res.json({ qrcode: response.data.qrcode });
-  } catch (error) {
-    console.error('Erro ao obter QR code:', error.message);
-    res.status(500).json({ error: 'Erro ao obter QR code' });
-  }
-});
-
-// Rota para enviar mensagem via WhatsApp
+// Rota para enviar mensagens (POST)
 app.post('/send', async (req, res) => {
-  const { number, message } = req.body;
-  if (!number || !message) {
-    return res.status(400).json({ error: 'Número e mensagem são obrigatórios' });
-  }
-  console.log(`Enviando mensagem para ${number}: ${message}`);
-  try {
-    await axios.post(`${EVOLUTION_API_URL}/message/sendText`, {
-      number: `${number}@s.whatsapp.net`,
-      text: message
-    }, {
-      headers: { 'apikey': EVOLUTION_API_KEY }
-    });
-    console.log('Mensagem enviada com sucesso');
-    res.json({ success: true });
-  } catch (error) {
-    console.error('Erro ao enviar mensagem:', error.message);
-    res.status(500).json({ error: 'Erro ao enviar mensagem' });
-  }
+  let rawBody = '';
+  req.setEncoding('utf8');
+  req.on('data', chunk => rawBody += chunk);
+
+  req.on('end', async () => {
+    try {
+      // Parsear o corpo bruto
+      const body = cleanAndParseJSON(rawBody);
+
+      // Verificar se "dados" existe e parsear o JSON interno
+      if (!body.dados) {
+        console.error('Requisição inválida: campo "dados" não encontrado');
+        return res.status(400).send();
+      }
+
+      const dadosParsed = cleanAndParseJSON(body.dados);
+      if (!dadosParsed.messages || !Array.isArray(dadosParsed.messages)) {
+        console.error('Requisição inválida: "messages" deve ser uma lista dentro de "dados"');
+        return res.status(400).send();
+      }
+
+      const messages = dadosParsed.messages;
+      if (messages.length > MAX_MESSAGES_PER_REQUEST) {
+        console.error(`Número de mensagens (${messages.length}) excede o limite de ${MAX_MESSAGES_PER_REQUEST}`);
+        return res.status(400).send();
+      }
+
+      console.log(`Requisição POST recebida com ${messages.length} mensagens para envio programado`);
+
+      // Programar envio de cada mensagem com delay
+      const sendPromises = [];
+      let currentDelay = 0;
+      for (const msg of messages) {
+        const { telefone, message } = msg;
+        if (!telefone || !message) {
+          console.log(`Mensagem inválida ignorada: ${JSON.stringify(msg)}`);
+          continue;
+        }
+        const delay = currentDelay + Math.floor(Math.random() * (MAX_DELAY - MIN_DELAY + 1)) + MIN_DELAY;
+        sendPromises.push(sendMessageWithDelay({ telefone, message }, delay));
+        currentDelay = delay;
+      }
+
+      // Responder com status 200 sem corpo
+      res.status(200).send();
+
+      // Executar os envios em segundo plano e logar os resultados
+      const results = await Promise.all(sendPromises);
+      console.log('Resultado do envio em massa:', results);
+    } catch (error) {
+      console.error('Erro ao processar requisição /send:', error);
+      res.status(500).send();
+    }
+  });
 });
 
-// Rota de ping
+// Rota simples pra "ping"
 app.get('/ping', (req, res) => {
-  console.log('Recebido ping');
+  console.log('Ping recebido! Servidor está ativo.');
   res.send('Pong!');
 });
 
-// Agendamento: 8h, segunda a sexta, para data atual
-cron.schedule('0 8 * * 1-5', async () => {
-  console.log('Iniciando busca automática às 8h (America/Sao_Paulo)');
-  try {
-    const publications = await fetchDatajudPublications({ gte: 'now/d', lte: 'now/d' });
-    console.log(`Busca automática concluída: ${publications.length} publicações encontradas`);
-  } catch (error) {
-    console.error('Erro na busca automática:', error.message);
-  }
-}, { timezone: 'America/Sao_Paulo' });
+// Função para conectar ao WhatsApp
+const connectToWhatsApp = async (retryCount = 0) => {
+  const authDir = path.join(__dirname, 'auth_info');
+  const { state, saveCreds } = await useMultiFileAuthState(authDir);
 
-// Keep-alive
-setInterval(async () => {
-  console.log('Enviando keep-alive para', KEEP_ALIVE_URL);
+  const sock = makeWASocket({
+    auth: state,
+    printQRInTerminal: false,
+    defaultQueryTimeoutMs: 60_000,
+  });
+
+  sock.ev.on('creds.update', saveCreds);
+
+  sock.ev.on('messages.upsert', async ({ messages }) => {
+    console.log('Nova mensagem recebida:', messages);
+
+    const msg = messages[0];
+    if (!msg || !msg.message) return;
+
+    if (msg.key.remoteJid.endsWith('@g.us')) {
+      console.log('Mensagem de grupo ignorada:', msg.key.remoteJid);
+      return;
+    }
+
+    const messageType = Object.keys(msg.message)[0];
+    if (messageType !== 'conversation' && messageType !== 'extendedTextMessage') return;
+
+    const senderNumber = msg.key.remoteJid.split('@')[0];
+    const conversationId = msg.key.id;
+    const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
+    const senderName = msg.pushName || senderNumber;
+    const currentTime = Date.now();
+
+    console.log(`Mensagem recebida de ${senderName} (${senderNumber}) - ID da conversa: ${conversationId}: ${text}`);
+
+    const senderData = allowedSenders.get(senderNumber);
+    const isAllowed = senderData && (currentTime - senderData.lastMessageTime) < MESSAGE_TIMEOUT;
+    const drEliahRegex = /dr\.?\s*eliah/i;
+    const containsDrEliah = drEliahRegex.test(text);
+
+    if (!isAllowed && !containsDrEliah) {
+      console.log(`Mensagem ignorada: remetente ${senderNumber} não está liberado e mensagem não contém "Dr. Eliah".`);
+      return;
+    }
+
+    if (containsDrEliah) {
+      console.log(`Remetente ${senderNumber} liberado por mencionar "Dr. Eliah".`);
+    }
+
+    allowedSenders.set(senderNumber, { lastMessageTime: currentTime });
+
+    const webhookData = {
+      number: senderNumber,
+      conversationId: conversationId,
+      message: text,
+      name: senderName,
+    };
+
+    await sendToMake(webhookData);
+  });
+
+  sock.ev.on('connection.update', (update) => {
+    const { connection, qr, lastDisconnect } = update;
+    if (qr) {
+      const qrLink = `https://api.qrserver.com/v1/create-qr-code/?data=${encodeURIComponent(qr)}`;
+      console.log('Link do QR Code (clique para visualizar):', qrLink);
+    }
+    if (connection === 'open') {
+      console.log('Conectado ao WhatsApp com sucesso!');
+      global.client = sock;
+      retryCount = 0;
+    }
+    if (connection === 'close') {
+      const reason = lastDisconnect?.error?.message || 'Motivo desconhecido';
+      console.log(`Desconectado! Motivo: ${reason}. Reconectando...`);
+      const delay = Math.min(5_000 * Math.pow(2, retryCount), 60_000);
+      setTimeout(() => connectToWhatsApp(retryCount + 1), delay);
+    }
+  });
+};
+
+// --- Código pra validação de mídia ---
+
+// Função pra baixar a imagem
+async function downloadImage(url) {
   try {
-    const response = await fetch(KEEP_ALIVE_URL, { timeout: FETCH_TIMEOUT });
-    console.log(`Keep-alive resposta: ${response.status}`);
+    const response = await axios.get(url, {
+      responseType: 'arraybuffer',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Referer': 'https://www.wix.com'
+      }
+    });
+    return Buffer.from(response.data);
   } catch (error) {
-    console.error('Erro no keep-alive:', error.message);
+    console.error(`Erro ao baixar a imagem ${url}:`, error.message);
+    throw new Error(`Falha ao baixar a imagem: ${error.message}`);
   }
-}, KEEP_ALIVE_INTERVAL);
+}
+
+// Função pra gerar hash SHA-256
+function generateHash(data) {
+  return crypto.createHash('sha256').update(data).digest('hex');
+}
+
+// Função pra extrair metadados EXIF usando exiftool-vendored
+async function extractExif(imageBuffer) {
+  try {
+    // Salvar o buffer temporariamente em um arquivo para usar com exiftool
+    const tempFilePath = path.join(__dirname, `temp-${Date.now()}.heic`);
+    await fs.writeFile(tempFilePath, imageBuffer);
+
+    // Extrair metadados com exiftool-vendored
+    const tags = await exiftool.read(tempFilePath);
+    console.log(`[Validate-Media] Tags brutas extraídas com exiftool:`, tags);
+
+    // Converter coordenadas DMS para decimal, se disponíveis
+    const getGpsCoordinate = (value, ref) => {
+      if (!value || !ref) return null;
+      const degreesMatch = value.match(/(\d+)\s*deg/);
+      const minutesMatch = value.match(/(\d+\.?\d*)\s*'/);
+      const secondsMatch = value.match(/(\d+\.?\d*)\s*"/);
+      const degrees = degreesMatch ? parseFloat(degreesMatch[1]) : 0;
+      const minutes = minutesMatch ? parseFloat(minutesMatch[1]) : 0;
+      const seconds = secondsMatch ? parseFloat(secondsMatch[1]) : 0;
+      let decimal = degrees + (minutes / 60) + (seconds / 3600);
+      if (ref === 'S' || ref === 'W') decimal = -decimal;
+      return decimal;
+    };
+
+    // Tentar extrair metadados padrão
+    const gpsLatitude = tags.GPSLatitude && tags.GPSLatitudeRef
+      ? getGpsCoordinate(tags.GPSLatitude, tags.GPSLatitudeRef)
+      : null;
+    const gpsLongitude = tags.GPSLongitude && tags.GPSLongitudeRef
+      ? getGpsCoordinate(tags.GPSLongitude, tags.GPSLongitudeRef)
+      : null;
+
+    let exifData = {
+      createDate: '',
+      make: tags.Make || '',
+      model: tags.Model || '',
+      software: tags.Software || '',
+      dateTimeOriginal: tags.DateTimeOriginal || '',
+      mccData: tags.MCCData || '',
+      gps: gpsLatitude && gpsLongitude ? {
+        latitude: gpsLatitude,
+        longitude: gpsLongitude
+      } : null
+    };
+
+    // Prioridade para createDate: DateTimeOriginal > CreateDate
+    if (tags.DateTimeOriginal) {
+      exifData.createDate = tags.DateTimeOriginal;
+    } else if (tags.CreateDate) {
+      exifData.createDate = tags.CreateDate;
+    }
+
+    // Se for uma imagem PNG, tentar extrair metadados PNG adicionais
+    const isPng = imageBuffer.slice(0, 8).toString('hex') === '89504e470d0a1a0a'; // Assinatura PNG
+    if (isPng) {
+      console.log('[Validate-Media] Imagem PNG detectada. Tentando extrair metadados PNG...');
+      try {
+        const png = new PNG();
+        const chunks = [];
+
+        // Parsear a imagem e coletar chunks
+        png.parse(imageBuffer, (err) => {
+          if (err) {
+            console.error('[Validate-Media] Erro ao parsear PNG:', err.message);
+            return;
+          }
+        });
+
+        // Ler os chunks manualmente
+        const chunkData = [];
+        let offset = 8; // Pular a assinatura PNG
+        while (offset < imageBuffer.length) {
+          const length = imageBuffer.readUInt32BE(offset);
+          const type = imageBuffer.slice(offset + 4, offset + 8).toString();
+          const data = imageBuffer.slice(offset + 8, offset + 8 + length);
+          chunkData.push({ name: type, data });
+          offset += 12 + length; // 4 bytes length + 4 bytes type + data + 4 bytes CRC
+        }
+
+        // Procurar por tIME (data de modificação)
+        const timeChunk = chunkData.find(chunk => chunk.name === 'tIME');
+        if (timeChunk) {
+          const data = timeChunk.data;
+          const year = data.readUInt16BE(0);
+          const month = data.readUInt8(2);
+          const day = data.readUInt8(3);
+          const hour = data.readUInt8(4);
+          const minute = data.readUInt8(5);
+          const second = data.readUInt8(6);
+          const tIME = `${year}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')} ${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}:${second.toString().padStart(2, '0')}`;
+          exifData.createDate = exifData.createDate || tIME;
+        }
+
+        // Procurar por Creation Time em tEXt ou iTXt
+        const textChunks = chunkData.filter(chunk => chunk.name === 'tEXt' || chunk.name === 'iTXt');
+        const creationTimeChunk = textChunks.find(chunk => {
+          const text = chunk.data.toString('utf8');
+          return text.includes('Creation Time');
+        });
+        if (creationTimeChunk) {
+          const text = creationTimeChunk.data.toString('utf8');
+          const creationTime = text.split('Creation Time\0')[1];
+          exifData.createDate = creationTime; // Prioridade para Creation Time
+        }
+
+        console.log('[Validate-Media] Metadados PNG extraídos:', { createDate: exifData.createDate });
+      } catch (error) {
+        console.error('[Validate-Media] Erro ao extrair metadados PNG:', error.message);
+      }
+    }
+
+    // Limpar o arquivo temporário
+    await fs.unlink(tempFilePath);
+    return exifData;
+  } catch (error) {
+    console.error('Erro ao extrair metadados com exiftool:', error.message);
+    return { createDate: '', make: '', model: '', software: '', dateTimeOriginal: '', mccData: '', gps: null };
+  } finally {
+    // Garantir que o exiftool seja encerrado
+    await exiftool.end();
+  }
+}
+
+// Função pra verificar clareza da imagem (resolução mínima)
+function checkImageClarity(imageBuffer) {
+  try {
+    const { width, height } = require('image-size')(imageBuffer);
+    const minResolution = { width: 1280, height: 720 }; // 720p
+    return {
+      isClear: width >= minResolution.width && height >= minResolution.height,
+      resolution: `${width}x${height}`
+    };
+  } catch (error) {
+    console.error('Erro ao verificar clareza da imagem:', error.message);
+    return { isClear: false, resolution: 'Desconhecida' };
+  }
+}
+
+// Função auxiliar pra processar uma única imagem
+async function processSingleImage(imageUrl) {
+  console.log(`[Validate-Media] Processando imagem: ${imageUrl}`);
+
+  // Cadeia de custódia
+  const chainOfCustody = [
+    { step: 'Upload pelo cliente', who: 'Cliente via Wix', when: new Date().toISOString() },
+    { step: 'Recebido pelo Make', who: 'Make Workflow', when: new Date().toISOString() },
+    { step: 'Processado pelo Render', who: 'Render Server', when: new Date().toISOString() }
+  ];
+
+  try {
+    // Baixar a imagem
+    const imageBuffer = await downloadImage(imageUrl);
+
+    // Gerar hash
+    const hash = generateHash(imageBuffer);
+    console.log(`[Validate-Media] Hash gerado: ${hash}`);
+
+    // Extrair metadados EXIF e outros
+    const exif = await extractExif(imageBuffer);
+    console.log(`[Validate-Media] Metadados extraídos:`, exif);
+
+    // Verificar clareza
+    const clarity = checkImageClarity(imageBuffer);
+    console.log(`[Validate-Media] Clareza da imagem:`, clarity);
+
+    // Autenticação da origem
+    const origin = {
+      uploader: 'Cliente via Wix',
+      uploaderDocument: 'Não fornecido',
+      uploadTimestamp: new Date().toISOString(),
+      deviceInfo: exif.make && exif.model ? `${exif.make} ${exif.model}` : 'Desconhecido'
+    };
+
+    return {
+      success: true,
+      originalUrl: imageUrl,
+      hash,
+      exif,
+      clarity,
+      chainOfCustody,
+      origin
+    };
+  } catch (error) {
+    console.error(`[Validate-Media] Erro ao processar imagem ${imageUrl}:`, error.message);
+    return {
+      success: false,
+      originalUrl: imageUrl,
+      error: error.message
+    };
+  }
+}
+
+// Rota pra validar mídia
+app.post('/validate-media', async (req, res) => {
+  try {
+    let { imageUrls } = req.body;
+
+    console.log(`[Validate-Media] Recebido imageUrls: ${imageUrls}`);
+
+    // Verificar se imageUrls é uma string e convertê-la em array, se necessário
+    if (typeof imageUrls === 'string') {
+      imageUrls = imageUrls.split(/,\s*/).map(url => url.trim());
+      console.log(`[Validate-Media] Após split:`, imageUrls);
+    }
+
+    // Validar se imageUrls é um array e não está vazio
+    if (!Array.isArray(imageUrls) || imageUrls.length === 0) {
+      return res.status(400).json({ error: 'imageUrls é obrigatório e deve ser uma lista não vazia' });
+    }
+
+    console.log(`[Validate-Media] Processando ${imageUrls.length} imagens`);
+
+    // Processar cada imagem em paralelo
+    const results = await Promise.all(
+      imageUrls.map(url => processSingleImage(url))
+    );
+
+    // Separar resultados bem-sucedidos de falhas
+    const successfulResults = results.filter(result => result.success);
+    const failedResults = results.filter(result => !result.success);
+
+    if (successfulResults.length === 0) {
+      const responseData = {
+        error: 'Nenhuma imagem pôde ser processada',
+        failed: failedResults
+      };
+      // Enviar para o Make mesmo em caso de falha total
+      await sendToMake(responseData);
+      return res.status(500).json(responseData);
+    }
+
+    // Preparar o JSON de resposta
+    const responseData = {
+      images: successfulResults,
+      failed: failedResults.length > 0 ? failedResults : undefined
+    };
+
+    // Enviar o resultado para o Make
+    const sentToMake = await sendToMake(responseData);
+    if (!sentToMake) {
+      console.error('[Validate-Media] Falha ao enviar resultado para o Make');
+      return res.status(500).json({ error: 'Erro ao enviar resultado para o Make' });
+    }
+
+    // Responder ao cliente
+    res.status(200).json({ message: 'Imagens processadas e resultado enviado ao Make com sucesso' });
+  } catch (error) {
+    console.error('[Validate-Media] Erro ao processar imagens:', error.message);
+    const errorResponse = { error: 'Erro ao processar imagens', details: error.message };
+    // Enviar erro para o Make
+    await sendToMake(errorResponse);
+    res.status(500).json(errorResponse);
+  }
+});
+
+// Middleware para tratamento de erros
+app.use((err, req, res, next) => {
+  if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
+    console.error('Erro de parsing JSON:', err.message);
+    return res.status(400).json({ error: 'Corpo da requisição não é um JSON válido' });
+  }
+  next();
+});
 
 // Inicia o servidor
-server = app.listen(port, '0.0.0.0', () => {
+app.listen(port, '0.0.0.0', () => {
   console.log(`Servidor rodando na porta ${port}`);
 });
+
+// Conecta ao WhatsApp
+connectToWhatsApp();
+
+// Função para limpar remetentes expirados
+const cleanupExpiredSenders = () => {
+  const currentTime = Date.now();
+  for (const [senderNumber, data] of allowedSenders.entries()) {
+    if ((currentTime - data.lastMessageTime) >= MESSAGE_TIMEOUT) {
+      console.log(`Remetente ${senderNumber} removido da lista de liberados: última mensagem foi há mais de 30 minutos.`);
+      allowedSenders.delete(senderNumber);
+    }
+  }
+};
+
+setInterval(cleanupExpiredSenders, CLEANUP_INTERVAL);
+
+// Função para "pingar" a si mesmo
+let keepAliveFailures = 0;
+const keepAlive = async () => {
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
+    const response = await fetch(KEEP_ALIVE_URL, { signal: controller.signal });
+    clearTimeout(timeoutId);
+    const text = await response.text();
+    console.log(`Keep-alive ping: ${text}`);
+    keepAliveFailures = 0;
+  } catch (error) {
+    console.error('Erro ao fazer keep-alive ping:', error);
+    keepAliveFailures++;
+    if (keepAliveFailures >= 3) {
+      console.error('Keep-alive falhou 3 vezes consecutivas. Verifique a conectividade.');
+    }
+  }
+};
+
+setInterval(keepAlive, KEEP_ALIVE_INTERVAL);
