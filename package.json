@@ -1,23 +1,16 @@
 {
-  "name": "whatsapp-api-render",
+  "name": "advgestor",
   "version": "1.0.0",
-  "description": "API for WhatsApp integration with Render",
+  "description": "Serviço para integração com WhatsApp e Datajud",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "baileys": "^6.7.16",
+    "@adiwajshing/baileys": "^6.7.7",
     "axios": "^1.7.2",
     "express": "^4.19.2",
-    "form-data": "^4.0.0",
-    "image-size": "^1.1.1",
-    "node-fetch": "^2.7.0",
-    "exifreader": "^4.13.0",
-    "pngjs": "^6.0.0",
-    "exiftool-vendored": "^22.2.0"
-  },
-  "engines": {
-    "node": ">=20.0.0"
+    "node-cron": "^3.0.3",
+    "node-fetch": "^2.7.0"
   }
 }
