@@ -1,15 +1,12 @@
 {
   "name": "advgestor",
   "version": "1.0.0",
-  "description": "Serviço para integração com Datajud",
+  "description": "Serviço minimalista para teste no Render",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "axios": "^1.7.2",
-    "express": "^4.19.2",
-    "node-cron": "^3.0.3",
-    "node-fetch": "^2.7.0"
+    "express": "^4.19.2"
   }
 }
