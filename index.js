@@ -1,4 +1,5 @@
 const express = require('express');
+const fetch = require('node-fetch');
 const axios = require('axios');
 
 const app = express();
@@ -11,40 +12,52 @@ const DATAJUD_TRIBUNAL = process.env.DATAJUD_TRIBUNAL || 'tjba';
 const ADVOCATE_NAME = process.env.ADVOCATE_NAME;
 const FETCH_TIMEOUT = 10_000;
 
-// Controle de busca
-let publicationCheck = { date: null, completed: false };
+// Controle de busca de publicações
+let publicationCheck = {
+  date: null,
+  completed: false
+};
 let isCheckingPublications = false;
 
-// Verificar variáveis
+// Verificar variáveis de ambiente
 console.log('Verificando variáveis de ambiente...');
 if (!WEBHOOK_URL) throw new Error('WEBHOOK_URL não definida');
 if (!DATAJUD_API_KEY) throw new Error('DATAJUD_API_KEY não definida');
 if (!ADVOCATE_NAME) throw new Error('ADVOCATE_NAME não definida');
-console.log('Variáveis OK');
+console.log('Variáveis de ambiente OK');
 
+// Middleware
 app.use(express.json());
 
+// Função para enviar dados ao Make
 async function sendToMake(data) {
   console.log('Enviando ao Make:', data);
-  try {
-    const response = await fetch(WEBHOOK_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data),
-      timeout: FETCH_TIMEOUT,
-    });
-    if (response.ok) {
-      console.log('Enviado com sucesso');
-      return true;
+  let retries = 3;
+  while (retries > 0) {
+    try {
+      const response = await fetch(WEBHOOK_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+        timeout: FETCH_TIMEOUT,
+      });
+      if (response.ok) {
+        console.log('Dados enviados com sucesso');
+        return true;
+      }
+      console.error(`Erro no Make: Status ${response.status}`);
+      throw new Error(`Status ${response.status}`);
+    } catch (error) {
+      retries--;
+      console.error(`Erro ao enviar ao Make (tentativa ${4 - retries}/3):`, error.message);
+      if (retries === 0) return false;
+      await new Promise(resolve => setTimeout(resolve, 2000 * (3 - retries)));
     }
-    console.error(`Erro: Status ${response.status}`);
-    return false;
-  } catch (error) {
-    console.error('Erro ao enviar:', error.message);
-    return false;
   }
+  return false;
 }
 
+// Função para classificar tipo de publicação
 function classifyPublicationType(movement) {
   if (!movement) return 'Outros';
   movement = movement.toLowerCase();
@@ -55,19 +68,21 @@ function classifyPublicationType(movement) {
   return 'Outros';
 }
 
+// Função para buscar publicações com paginação (data fixa: 2025-04-16)
 async function fetchDatajudPublications() {
   if (isCheckingPublications) {
-    console.log('Busca em andamento, ignorando...');
+    console.log('Busca de publicações já em andamento, ignorando...');
     return [];
   }
   isCheckingPublications = true;
 
+  // Verificar duplicatas
   const currentDate = new Date().toISOString().split('T')[0];
   if (publicationCheck.date !== currentDate) {
-    publicationCheck = { date: null, completed: false };
+    publicationCheck = { date: null, completed: false }; // Reset ao mudar de dia
   }
   if (publicationCheck.completed) {
-    console.log('Publicações já enviadas hoje');
+    console.log('Publicações já enviadas hoje, ignorando busca');
     isCheckingPublications = false;
     return [];
   }
@@ -75,14 +90,14 @@ async function fetchDatajudPublications() {
   let allPublications = [];
   let from = 0;
   const size = 10;
-  const maxPages = 10;
+  const maxPages = 10; // Limite de segurança
   let page = 0;
 
   const endpoint = `https://api-publica.datajud.cnj.jus.br/api_publica_${DATAJUD_TRIBUNAL}/_search`;
 
   try {
     while (page < maxPages) {
-      console.log(`Buscando página ${page + 1}`);
+      console.log(`Buscando página ${page + 1}...`);
       const requestBody = {
         query: {
           bool: {
@@ -136,38 +151,41 @@ async function fetchDatajudPublications() {
       allPublications.push(...publications);
       console.log(`Página ${page + 1}: ${publications.length} publicações`);
 
-      if (publications.length < size) break;
+      if (publications.length < size) break; // Fim da paginação
       from += size;
       page++;
     }
 
-    console.log(`Total de publicações: ${allPublications.length}`);
+    console.log(`Total de publicações encontradas: ${allPublications.length}`);
 
+    // Enviar ao Make
     let allSent = true;
     for (const pub of allPublications) {
       const success = await sendToMake(pub);
       if (!success) {
-        console.error(`Falha ao enviar: ${JSON.stringify(pub)}`);
+        console.error(`Falha ao enviar publicação: ${JSON.stringify(pub)}`);
         allSent = false;
       }
-      await new Promise(resolve => setTimeout(resolve, 5000));
+      await new Promise(resolve => setTimeout(resolve, 5000)); // 5 segundos
     }
 
+    // Marcar como concluído se todas foram enviadas
     if (allSent && allPublications.length > 0) {
       publicationCheck = { date: currentDate, completed: true };
     }
 
     return allPublications;
   } catch (error) {
-    console.error('Erro ao buscar:', error.message);
+    console.error('Erro ao buscar publicações:', error.message);
     return [];
   } finally {
     isCheckingPublications = false;
   }
 }
 
+// Rota de teste
 app.get('/test-fetch-publications', async (req, res) => {
-  console.log('Iniciando teste para 2025-04-16');
+  console.log('Iniciando teste de busca de publicações no TJBA para 2025-04-16');
   try {
     const publications = await fetchDatajudPublications();
     res.status(200).json({
@@ -181,8 +199,13 @@ app.get('/test-fetch-publications', async (req, res) => {
   }
 });
 
-app.get('/ping', (req, res) => res.send('Pong!'));
+// Rota de ping
+app.get('/ping', (req, res) => {
+  console.log('Recebido ping');
+  res.send('Pong!');
+});
 
+// Inicia o servidor
 app.listen(port, '0.0.0.0', () => {
   console.log(`Servidor rodando na porta ${port}`);
 });
