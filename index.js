@@ -1,6 +1,7 @@
 const express = require('express');
 const fetch = require('node-fetch');
 const axios = require('axios');
+const cron = require('node-cron');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -19,11 +20,29 @@ let publicationCheck = {
 };
 let isCheckingPublications = false;
 
+// Manipulação de SIGTERM
+process.on('SIGTERM', () => {
+  console.log('Recebido SIGTERM. Encerrando servidor...');
+  app.close(() => {
+    console.log('Servidor encerrado com sucesso');
+    process.exit(0);
+  });
+});
+
 // Verificar variáveis de ambiente
 console.log('Verificando variáveis de ambiente...');
-if (!WEBHOOK_URL) throw new Error('WEBHOOK_URL não definida');
-if (!DATAJUD_API_KEY) throw new Error('DATAJUD_API_KEY não definida');
-if (!ADVOCATE_NAME) throw new Error('ADVOCATE_NAME não definida');
+if (!WEBHOOK_URL) {
+  console.error('Erro: WEBHOOK_URL não definida');
+  process.exit(1);
+}
+if (!DATAJUD_API_KEY) {
+  console.error('Erro: DATAJUD_API_KEY não definida');
+  process.exit(1);
+}
+if (!ADVOCATE_NAME) {
+  console.error('Erro: ADVOCATE_NAME não definida');
+  process.exit(1);
+}
 console.log('Variáveis de ambiente OK');
 
 // Middleware
@@ -42,7 +61,7 @@ async function sendToMake(data) {
         timeout: FETCH_TIMEOUT,
       });
       if (response.ok) {
-        console.log('Dados enviados com sucesso');
+        console.log('Dados enviados com sucesso ao Make');
         return true;
       }
       console.error(`Erro no Make: Status ${response.status}`);
@@ -68,8 +87,8 @@ function classifyPublicationType(movement) {
   return 'Outros';
 }
 
-// Função para buscar publicações com paginação (data fixa: 2025-04-16)
-async function fetchDatajudPublications() {
+// Função para buscar publicações com paginação
+async function fetchDatajudPublications(dateRange = { gte: '2025-04-16', lte: '2025-04-16' }) {
   if (isCheckingPublications) {
     console.log('Busca de publicações já em andamento, ignorando...');
     return [];
@@ -97,17 +116,14 @@ async function fetchDatajudPublications() {
 
   try {
     while (page < maxPages) {
-      console.log(`Buscando página ${page + 1}...`);
+      console.log(`Buscando página ${page + 1} para data ${dateRange.gte}...`);
       const requestBody = {
         query: {
           bool: {
             filter: [
               {
                 range: {
-                  dataPublicacao: {
-                    gte: '2025-04-16',
-                    lte: '2025-04-16'
-                  }
+                  dataPublicacao: dateRange
                 }
               }
             ],
@@ -143,7 +159,7 @@ async function fetchDatajudPublications() {
         numeroProcesso: hit._source.id || 'Desconhecido',
         tipoPublicacao: classifyPublicationType(hit._source.movimentos?.nome),
         orgaoJulgador: hit._source.orgaoJulgador?.nome || 'Desconhecido',
-        dataPublicacao: hit._source.dataPublicacao || '2025-04-16',
+        dataPublicacao: hit._source.dataPublicacao || dateRange.gte,
         grau: hit._source.grau || 'Desconhecido',
         classeProcessual: hit._source.classeProcessual?.nome || 'Desconhecida'
       }));
@@ -172,6 +188,7 @@ async function fetchDatajudPublications() {
     // Marcar como concluído se todas foram enviadas
     if (allSent && allPublications.length > 0) {
       publicationCheck = { date: currentDate, completed: true };
+      console.log('Busca concluída com sucesso, publicationCheck atualizado:', publicationCheck);
     }
 
     return allPublications;
@@ -183,11 +200,11 @@ async function fetchDatajudPublications() {
   }
 }
 
-// Rota de teste
+// Rota de teste (mantém data fixa para validação)
 app.get('/test-fetch-publications', async (req, res) => {
   console.log('Iniciando teste de busca de publicações no TJBA para 2025-04-16');
   try {
-    const publications = await fetchDatajudPublications();
+    const publications = await fetchDatajudPublications({ gte: '2025-04-16', lte: '2025-04-16' });
     res.status(200).json({
       message: `Encontradas ${publications.length} publicações para 2025-04-16`,
       publications,
@@ -205,7 +222,18 @@ app.get('/ping', (req, res) => {
   res.send('Pong!');
 });
 
+// Agendamento: 8h, segunda a sexta, para data atual
+cron.schedule('0 8 * * 1-5', async () => {
+  console.log('Iniciando busca automática às 8h (America/Sao_Paulo)');
+  try {
+    const publications = await fetchDatajudPublications({ gte: 'now/d', lte: 'now/d' });
+    console.log(`Busca automática concluída: ${publications.length} publicações encontradas`);
+  } catch (error) {
+    console.error('Erro na busca automática:', error.message);
+  }
+}, { timezone: 'America/Sao_Paulo' });
+
 // Inicia o servidor
-app.listen(port, '0.0.0.0', () => {
+const server = app.listen(port, '0.0.0.0', () => {
   console.log(`Servidor rodando na porta ${port}`);
 });
