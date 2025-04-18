@@ -12,7 +12,8 @@ const port = process.env.PORT || 3000;
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
 const KEEP_ALIVE_URL = process.env.KEEP_ALIVE_URL;
 const DATAJUD_API_KEY = process.env.DATAJUD_API_KEY;
-const DATAJUD_TRIBUNAL = process.env.DATAJUD_TRIBUNAL || 'tjam'; // Ex.: 'tjam' para Tribunal de Justiça do Amazonas
+const DATAJUD_TRIBUNAL = process.env.DATAJUD_TRIBUNAL || 'tjam';
+const ADVOCATE_NAME = process.env.ADVOCATE_NAME;
 const KEEP_ALIVE_INTERVAL = 14 * 60 * 1000; // 14 minutos
 const FETCH_TIMEOUT = 10_000; // 10 segundos
 const MESSAGE_TIMEOUT = 30 * 60 * 1000; // 30 minutos
@@ -22,41 +23,30 @@ const MAX_DELAY = 30_000; // 30 segundos
 const MAX_MESSAGES_PER_REQUEST = 50;
 
 // Verificar variáveis de ambiente
-if (!WEBHOOK_URL) {
-  console.error('Erro: WEBHOOK_URL não está definida.');
-  process.exit(1);
-}
-if (!KEEP_ALIVE_URL) {
-  console.error('Erro: KEEP_ALIVE_URL não está definida.');
-  process.exit(1);
-}
-if (!DATAJUD_API_KEY) {
-  console.error('Erro: DATAJUD_API_KEY não está definida.');
-  process.exit(1);
-}
+if (!WEBHOOK_URL) throw new Error('WEBHOOK_URL não definida');
+if (!KEEP_ALIVE_URL) throw new Error('KEEP_ALIVE_URL não definida');
+if (!DATAJUD_API_KEY) throw new Error('DATAJUD_API_KEY não definida');
+if (!ADVOCATE_NAME) throw new Error('ADVOCATE_NAME não definida');
 
-// Armazenamento em memória dos números liberados
+// Armazenamento em memória
 const allowedSenders = new Map();
+let isCheckingPublications = false; // Controle para evitar verificações simultâneas
 
-// Middleware para parsear JSON, exceto na rota /send
+// Middleware
 app.use((req, res, next) => {
-  if (req.path === '/send' && req.method === 'POST') {
-    return next();
-  }
+  if (req.path === '/send' && req.method === 'POST') return next();
   return express.json()(req, res, next);
 });
 
-// Função para limpar e parsear JSON
+// Função para parsear JSON
 const cleanAndParseJSON = (data) => {
   try {
-    if (typeof data === 'object' && data !== null) {
-      return data;
-    }
+    if (typeof data === 'object' && data !== null) return data;
     let jsonString = typeof data === 'string' ? data : JSON.stringify(data);
     const firstBrace = jsonString.indexOf('{');
     const lastBrace = jsonString.lastIndexOf('}');
     if (firstBrace === -1 || lastBrace === -1 || firstBrace > lastBrace) {
-      throw new Error('JSON inválido: não contém chaves {}');
+      throw new Error('JSON inválido');
     }
     jsonString = jsonString.substring(firstBrace, lastBrace + 1).trim().replace(/'/g, '"');
     return JSON.parse(jsonString);
@@ -73,21 +63,20 @@ const sendMessageWithDelay = async ({ telefone, message }, delay) => {
       const cleanNumber = telefone.toString().replace(/[^0-9]/g, '');
       try {
         if (!global.client) {
-          console.error('Erro: Cliente WhatsApp não está conectado.');
-          resolve({ success: false, number: cleanNumber, error: 'Cliente WhatsApp não está conectado.' });
+          resolve({ success: false, number: cleanNumber, error: 'Cliente WhatsApp não conectado' });
           return;
         }
         const [result] = await global.client.onWhatsApp(`${cleanNumber}@s.whatsapp.net`);
         if (!result || !result.exists) {
-          console.log(`Número ${cleanNumber} não está registrado no WhatsApp`);
-          resolve({ success: false, number: cleanNumber, error: 'Número não registrado no WhatsApp' });
+          console.log(`Número ${cleanNumber} não registrado no WhatsApp`);
+          resolve({ success: false, number: cleanNumber, error: 'Número não registrado' });
           return;
         }
         const sentMessage = await global.client.sendMessage(`${cleanNumber}@s.whatsapp.net`, { text: message, linkPreview: false }, { timeout: 60_000 });
-        console.log(`Mensagem enviada com sucesso para: ${cleanNumber}`, sentMessage);
+        console.log(`Mensagem enviada para ${cleanNumber}`);
         resolve({ success: true, number: cleanNumber });
       } catch (error) {
-        console.error(`Erro ao enviar mensagem para ${cleanNumber}:`, error);
+        console.error(`Erro ao enviar para ${cleanNumber}:`, error);
         resolve({ success: false, number: cleanNumber, error: error.message });
       }
     }, delay);
@@ -106,22 +95,106 @@ async function sendToMake(data) {
         timeout: FETCH_TIMEOUT,
       });
       if (response.ok) {
-        console.log('Dados enviados ao Make com sucesso:', data);
+        console.log('Dados enviados ao Make:', data);
         return true;
-      } else {
-        throw new Error(`Webhook respondeu com status ${response.status}`);
       }
+      throw new Error(`Status ${response.status}`);
     } catch (error) {
       retries--;
       console.error(`Erro ao enviar ao Make (tentativa ${4 - retries}/3):`, error);
-      if (retries === 0) {
-        console.error('Falha ao enviar ao Make após 3 tentativas');
-        return false;
-      }
+      if (retries === 0) return false;
       await new Promise(resolve => setTimeout(resolve, 2000 * (3 - retries)));
     }
   }
   return false;
+}
+
+// Função para classificar o tipo de publicação
+function classifyPublicationType(text) {
+  if (!text) return 'Desconhecido';
+  text = text.toLowerCase();
+  if (text.includes('intimad')) return 'Intimação';
+  if (text.includes('despacho')) return 'Despacho';
+  if (text.includes('decisão') || text.includes('decid')) return 'Decisão';
+  if (text.includes('sentença')) return 'Sentença';
+  return 'Outros';
+}
+
+// Função para buscar publicações do Datajud
+async function fetchDatajudPublications() {
+  if (isCheckingPublications) {
+    console.log('Verificação de publicações já em andamento, ignorando...');
+    return [];
+  }
+  isCheckingPublications = true;
+
+  try {
+    const endpoint = `https://api-publica.datajud.cnj.jus.br/api_publica_${DATAJUD_TRIBUNAL}/_search`;
+    console.log(`Buscando publicações para ${ADVOCATE_NAME}`);
+
+    const requestBody = {
+      query: {
+        bool: {
+          filter: [
+            {
+              range: {
+                dataPublicacao: {
+                  gte: 'now/d',
+                  lte: 'now/d'
+                }
+              }
+            }
+          ],
+          must: [
+            {
+              match: {
+                'advogados.nome': ADVOCATE_NAME
+              }
+            }
+          ]
+        }
+      },
+      size: 100,
+      _source: ['numeroProcesso', 'tipoPublicacao', 'dataPublicacao', 'textoPublicacao']
+    };
+
+    const response = await axios.post(endpoint, requestBody, {
+      headers: {
+        'Authorization': `APIKey ${DATAJUD_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      timeout: FETCH_TIMEOUT
+    });
+
+    if (response.status !== 200) {
+      throw new Error(`Status ${response.status}`);
+    }
+
+    const publications = response.data.hits.hits.map(hit => hit._source);
+    console.log(`Encontradas ${publications.length} publicações`);
+
+    // Enviar cada publicação individualmente ao Make
+    for (const pub of publications) {
+      const publicationData = {
+        numeroProcesso: pub.numeroProcesso || 'Desconhecido',
+        tipoPublicacao: classifyPublicationType(pub.tipoPublicacao || pub.textoPublicacao),
+        dataPublicacao: pub.dataPublicacao || new Date().toISOString().split('T')[0]
+      };
+      const sent = await sendToMake(publicationData);
+      if (!sent) {
+        console.error(`Falha ao enviar publicação: ${JSON.stringify(publicationData)}`);
+      }
+      // Pequeno atraso para evitar sobrecarga no webhook
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+
+    return publications;
+  } catch (error) {
+    console.error('Erro ao buscar publicações:', error.message);
+    return [];
+  } finally {
+    isCheckingPublications = false;
+  }
 }
 
 // Rota para enviar mensagens
@@ -138,32 +211,27 @@ app.post('/send', async (req, res) => {
       if (body.dados) {
         const dadosParsed = cleanAndParseJSON(body.dados);
         if (!dadosParsed.messages || !Array.isArray(dadosParsed.messages)) {
-          console.error('Requisição inválida: "messages" deve ser uma lista dentro de "dados"');
+          console.error('Requisição inválida: "messages" deve ser uma lista');
           return res.status(400).send();
         }
         messages = dadosParsed.messages;
       } else if (body.number && body.message) {
         messages = [{ telefone: body.number, message: body.message }];
       } else {
-        console.error('Requisição inválida: o payload deve conter "dados" ou os campos "number" e "message"');
+        console.error('Requisição inválida: payload inválido');
         return res.status(400).send();
       }
 
       if (messages.length > MAX_MESSAGES_PER_REQUEST) {
-        console.error(`Número de mensagens (${messages.length}) excede o limite de ${MAX_MESSAGES_PER_REQUEST}`);
+        console.error(`Número de mensagens (${messages.length}) excede o limite`);
         return res.status(400).send();
       }
-
-      console.log(`Requisição POST recebida com ${messages.length} mensagens para envio`);
 
       const sendPromises = [];
       let currentDelay = 0;
       for (const msg of messages) {
         const { telefone, message } = msg;
-        if (!telefone || !message) {
-          console.log(`Mensagem inválida ignorada: ${JSON.stringify(msg)}`);
-          continue;
-        }
+        if (!telefone || !message) continue;
         const delay = currentDelay + Math.floor(Math.random() * (MAX_DELAY - MIN_DELAY + 1)) + MIN_DELAY;
         sendPromises.push(sendMessageWithDelay({ telefone, message }, delay));
         currentDelay = delay;
@@ -173,85 +241,48 @@ app.post('/send', async (req, res) => {
       const results = await Promise.all(sendPromises);
       console.log('Resultado do envio:', results);
     } catch (error) {
-      console.error('Erro ao processar /send:', error);
+      console.error('Erro em /send:', error);
       res.status(500).send();
     }
   });
 });
 
-// Função para buscar publicações do Datajud
-async function fetchDatajudPublications() {
-  try {
-    const endpoint = `https://api-publica.datajud.cnj.jus.br/api_publica_${DATAJUD_TRIBUNAL}/_search`;
-    console.log(`Buscando publicações no Datajud: ${endpoint}`);
-
-    // Exemplo de filtro para buscar publicações recentes (ajuste conforme necessário)
-    const requestBody = {
-      query: {
-        bool: {
-          filter: [
-            {
-              range: {
-                dataDistribuicao: {
-                  gte: "now-1d/d", // Últimas 24 horas
-                  lte: "now-1d/d"
-                }
-              }
-            }
-          ]
-        }
-      },
-      size: 100 // Limite de resultados por requisição (ajuste conforme necessário)
-    };
-
-    const response = await axios.post(endpoint, requestBody, {
-      headers: {
-        'Authorization': `APIKey ${DATAJUD_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      timeout: FETCH_TIMEOUT
-    });
-
-    if (response.status !== 200) {
-      throw new Error(`Erro na API do Datajud: Status ${response.status}`);
-    }
-
-    const publications = response.data.hits.hits.map(hit => hit._source);
-    console.log(`Encontradas ${publications.length} publicações`);
-
-    // Enviar os dados ao Make
-    const sentToMake = await sendToMake({ publications });
-    if (!sentToMake) {
-      console.error('Falha ao enviar publicações ao Make');
-    }
-
-    return publications;
-  } catch (error) {
-    console.error('Erro ao buscar publicações do Datajud:', error.message);
-    return [];
-  }
-}
-
-// Rota manual para testar a busca de publicações
+// Rota manual para testar publicações
 app.get('/fetch-publications', async (req, res) => {
   try {
     const publications = await fetchDatajudPublications();
-    res.status(200).json({ message: 'Publicações buscadas com sucesso', publications });
+    res.status(200).json({ message: 'Publicações buscadas', publications });
   } catch (error) {
-    console.error('Erro na rota /fetch-publications:', error.message);
+    console.error('Erro em /fetch-publications:', error.message);
     res.status(500).json({ error: 'Erro ao buscar publicações' });
   }
 });
 
-// Agendar busca diária às 8h
-cron.schedule('0 8 * * *', async () => {
-  console.log('Executando busca diária de publicações do Datajud');
-  await fetchDatajudPublications();
-}, {
-  timezone: 'America/Sao_Paulo'
-});
+// Agendamento: 8h, segunda a sexta
+cron.schedule('0 8 * * 1-5', async () => {
+  console.log('Verificação inicial de publicações às 8h');
+  const publications = await fetchDatajudPublications();
+  if (publications.length === 0) {
+    console.log('Nenhuma publicação encontrada, iniciando verificações a cada 15 minutos');
+    // Agendar verificações a cada 15 minutos até 18h
+    const retryJob = cron.schedule('*/15 * * * 1-5', async () => {
+      const retryPublications = await fetchDatajudPublications();
+      if (retryPublications.length > 0) {
+        console.log('Publicações encontradas, encerrando verificações');
+        retryJob.stop();
+      }
+      // Parar às 18h
+      const now = new Date();
+      const hours = now.getHours();
+      if (hours >= 18) {
+        console.log('Horário limite (18h) atingido, encerrando verificações');
+        retryJob.stop();
+      }
+    }, { timezone: 'America/Sao_Paulo' });
+  }
+}, { timezone: 'America/Sao_Paulo' });
 
-// Função para conectar ao WhatsApp
+// Conexão com WhatsApp
 const connectToWhatsApp = async (retryCount = 0) => {
   const authDir = path.join(__dirname, 'auth_info');
   const { state, saveCreds } = await useMultiFileAuthState(authDir);
@@ -267,11 +298,7 @@ const connectToWhatsApp = async (retryCount = 0) => {
   sock.ev.on('messages.upsert', async ({ messages }) => {
     const msg = messages[0];
     if (!msg || !msg.message) return;
-
-    if (msg.key.remoteJid.endsWith('@g.us')) {
-      console.log('Mensagem de grupo ignorada:', msg.key.remoteJid);
-      return;
-    }
+    if (msg.key.remoteJid.endsWith('@g.us')) return;
 
     const messageType = Object.keys(msg.message)[0];
     if (messageType !== 'conversation' && messageType !== 'extendedTextMessage') return;
@@ -282,20 +309,15 @@ const connectToWhatsApp = async (retryCount = 0) => {
     const senderName = msg.pushName || senderNumber;
     const currentTime = Date.now();
 
-    console.log(`Mensagem recebida de ${senderName} (${senderNumber}): ${text}`);
-
     const senderData = allowedSenders.get(senderNumber);
     const isAllowed = senderData && (currentTime - senderData.lastMessageTime) < MESSAGE_TIMEOUT;
     const drEliahRegex = /dr\.?\s*eliah/i;
     const containsDrEliah = drEliahRegex.test(text);
 
-    if (!isAllowed && !containsDrEliah) {
-      console.log(`Mensagem ignorada: remetente ${senderNumber} não liberado e sem "Dr. Eliah".`);
-      return;
-    }
+    if (!isAllowed && !containsDrEliah) return;
 
     if (containsDrEliah) {
-      console.log(`Remetente ${senderNumber} liberado por mencionar "Dr. Eliah".`);
+      console.log(`Remetente ${senderNumber} liberado por "Dr. Eliah"`);
     }
 
     allowedSenders.set(senderNumber, { lastMessageTime: currentTime });
@@ -306,24 +328,22 @@ const connectToWhatsApp = async (retryCount = 0) => {
       message: text,
       name: senderName,
     };
-
     await sendToMake(webhookData);
   });
 
   sock.ev.on('connection.update', (update) => {
     const { connection, qr, lastDisconnect } = update;
     if (qr) {
-      const qrLink = `https://api.qrserver.com/v1/create-qr-code/?data=${encodeURIComponent(qr)}`;
-      console.log('Link do QR Code:', qrLink);
+      console.log('Link do QR Code:', `https://api.qrserver.com/v1/create-qr-code/?data=${encodeURIComponent(qr)}`);
     }
     if (connection === 'open') {
-      console.log('Conectado ao WhatsApp com sucesso!');
+      console.log('Conectado ao WhatsApp!');
       global.client = sock;
       retryCount = 0;
     }
     if (connection === 'close') {
-      const reason = lastDisconnect?.error?.message || 'Motivo desconhecido';
-      console.log(`Desconectado! Motivo: ${reason}. Reconectando...`);
+      const reason = lastDisconnect?.error?.message || 'Desconhecido';
+      console.log(`Desconectado: ${reason}. Reconectando...`);
       const delay = Math.min(5_000 * Math.pow(2, retryCount), 60_000);
       setTimeout(() => connectToWhatsApp(retryCount + 1), delay);
     }
@@ -331,10 +351,7 @@ const connectToWhatsApp = async (retryCount = 0) => {
 };
 
 // Rota de ping
-app.get('/ping', (req, res) => {
-  console.log('Ping recebido!');
-  res.send('Pong!');
-});
+app.get('/ping', (req, res) => res.send('Pong!'));
 
 // Inicia o servidor
 app.listen(port, '0.0.0.0', () => {
@@ -344,35 +361,31 @@ app.listen(port, '0.0.0.0', () => {
 // Conecta ao WhatsApp
 connectToWhatsApp();
 
-// Limpeza de remetentes expirados
-const cleanupExpiredSenders = () => {
+// Limpeza de remetentes
+setInterval(() => {
   const currentTime = Date.now();
   for (const [senderNumber, data] of allowedSenders.entries()) {
     if ((currentTime - data.lastMessageTime) >= MESSAGE_TIMEOUT) {
-      console.log(`Remetente ${senderNumber} removido: inativo por mais de 30 minutos.`);
       allowedSenders.delete(senderNumber);
     }
   }
-};
-setInterval(cleanupExpiredSenders, CLEANUP_INTERVAL);
+}, CLEANUP_INTERVAL);
 
 // Keep-alive
 let keepAliveFailures = 0;
-const keepAlive = async () => {
+setInterval(async () => {
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
     const response = await fetch(KEEP_ALIVE_URL, { signal: controller.signal });
     clearTimeout(timeoutId);
-    const text = await response.text();
-    console.log(`Keep-alive ping: ${text}`);
+    console.log(`Keep-alive: ${await response.text()}`);
     keepAliveFailures = 0;
   } catch (error) {
     console.error('Erro no keep-alive:', error);
     keepAliveFailures++;
     if (keepAliveFailures >= 3) {
-      console.error('Keep-alive falhou 3 vezes consecutivas.');
+      console.error('Keep-alive falhou 3 vezes consecutivas');
     }
   }
-};
-setInterval(keepAlive, KEEP_ALIVE_INTERVAL);
+}, KEEP_ALIVE_INTERVAL);
