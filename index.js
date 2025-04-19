@@ -1,6 +1,5 @@
 const express = require('express');
 const venom = require('venom-bot');
-const qrcode = require('qrcode-terminal');
 const cors = require('cors');
 const fetch = require('node-fetch');
 
@@ -75,12 +74,20 @@ venom
         // Captura o QR code
         client.onQR((qr) => {
             console.log('QR Code gerado (texto):', qr);
-            qrcode.generate(qr, { small: true }); // Exibe no terminal para depuração
 
             // Gera um link de imagem usando a API do qrserver
             const encodedQr = encodeURIComponent(qr);
             qrCodeLink = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodedQr}`;
             console.log('Link do QR Code:', qrCodeLink);
+        });
+
+        // Monitora o estado da conexão
+        client.onStateChange((state) => {
+            console.log('Estado do WhatsApp:', state);
+            if (state === 'CONNECTED') {
+                qrCodeLink = ''; // Limpa o link do QR code quando conectado
+                console.log('Conexão com o WhatsApp estabelecida. QR Code não é mais necessário.');
+            }
         });
     })
     .catch((error) => {
@@ -90,9 +97,9 @@ venom
 // Endpoint para obter o link do QR code
 app.get('/qrcode', (req, res) => {
     if (qrCodeLink) {
-        res.send(`<a href="${qrCodeLink}" target="_blank">Clique aqui para visualizar o QR Code</a>`);
+        res.redirect(qrCodeLink); // Redireciona diretamente para a imagem do QR code
     } else {
-        res.send('QR Code ainda não foi gerado. Aguarde alguns segundos e tente novamente.');
+        res.send('QR Code não está disponível. O WhatsApp pode já estar conectado, ou aguarde alguns segundos e tente novamente.');
     }
 });
 
