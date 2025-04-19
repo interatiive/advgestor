@@ -22,6 +22,7 @@ RUN apt-get update && apt-get install -y \
     libxkbcommon0 \
     libasound2 \
     libxshmfence1 \
+    libxfixes3 \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Copia package.json e package-lock.json (se existir)
