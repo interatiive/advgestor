@@ -7,8 +7,8 @@ WORKDIR /usr/src/app
 #Copia package.json e package-lock.json (se existir)
 COPY package*.json ./
 
-#Atualiza o npm, limpa o cache e instala dependências
-RUN npm install -g npm@latest && npm cache clean --force && npm install --force
+#Limpa o cache e instala dependências
+RUN npm cache clean --force && npm install --force
 
 #Instala git (conforme mencionado anteriormente)
 RUN apt-get update && apt-get install -y git
