@@ -7,8 +7,8 @@ WORKDIR /usr/src/app
 #Copia package.json e package-lock.json (se existir)
 COPY package*.json ./
 
-#Limpa o cache e instala dependências com resoluções
-RUN npm cache clean --force && npm install --legacy-peer-deps
+#Limpa o cache e instala dependências
+RUN npm cache clean --force && npm install
 
 #Instala git (conforme mencionado anteriormente)
 RUN apt-get update && apt-get install -y git
