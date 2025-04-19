@@ -43,7 +43,7 @@ function checkInactiveNumbers() {
 // Verificação de inatividade a cada 10 minutos
 setInterval(checkInactiveNumbers, 10 * 60 * 1000);
 
-// Inicializa o cliente do WhatsApp
+// Inicializa o cliente do WhatsApp e captura o QR code
 venom
     .create({
         session: 'session-name',
@@ -71,26 +71,21 @@ venom
                 }
             }
         });
+
+        // Captura o QR code
+        client.onQR((qr) => {
+            console.log('QR Code gerado (texto):', qr);
+            qrcode.generate(qr, { small: true }); // Exibe no terminal para depuração
+
+            // Gera um link de imagem usando a API do qrserver
+            const encodedQr = encodeURIComponent(qr);
+            qrCodeLink = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodedQr}`;
+            console.log('Link do QR Code:', qrCodeLink);
+        });
     })
     .catch((error) => {
         console.error('Erro ao iniciar cliente WhatsApp:', error);
     });
-
-// Gera o QR code e o converte em link usando qrserver
-venom.create({
-    session: 'session-name',
-    multidevice: true
-}).then((clientInstance) => {
-    clientInstance.onQR((qr) => {
-        console.log('QR Code gerado:');
-        qrcode.generate(qr, { small: true }); // Exibe no terminal para depuração
-
-        // Gera um link de imagem usando a API do qrserver
-        const encodedQr = encodeURIComponent(qr);
-        qrCodeLink = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodedQr}`;
-        console.log('Link do QR Code:', qrCodeLink);
-    });
-});
 
 // Endpoint para obter o link do QR code
 app.get('/qrcode', (req, res) => {
