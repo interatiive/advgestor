@@ -172,55 +172,56 @@ app.get('/qrcode', (req, res) => {
 });
 
 // Rota para enviar mensagens
-app.post('/send', async (req, res) => {
-  let rawBody = '';
-  req.setEncoding('utf8');
-  req.on('data', chunk => rawBody += chunk);
+app.post('/send', express.json(), async (req, res) => {
+  try {
+    let messages = req.body;
 
-  req.on('end', async () => {
-    try {
-      const body = cleanAndParseJSON(rawBody);
-      let messages = [];
-
-      if (body.dados) {
-        const dadosParsed = cleanAndParseJSON(body.dados);
-        if (!dadosParsed.messages || !Array.isArray(dadosParsed.messages)) {
-          console.error('Requisição inválida: "messages" deve ser uma lista');
-          return res.status(400).json({ error: '"messages" deve ser uma lista' });
-        }
-        messages = dadosParsed.messages;
-      } else if (body.number && body.message) {
-        messages = [{ telefone: body.number, message: body.message }];
+    // Caso 1: Payload com "dados" (formato antigo do Wix ou Make)
+    if (messages.dados) {
+      const parsedData = cleanAndParseJSON(messages.dados);
+      if (parsedData.messages && Array.isArray(parsedData.messages)) {
+        messages = parsedData.messages; // Extrair "messages"
+      } else if (Array.isArray(parsedData)) {
+        messages = parsedData; // Se "dados" já contém o array direto
       } else {
-        console.error('Requisição inválida: payload inválido');
-        return res.status(400).json({ error: 'Payload inválido' });
+        console.error('Requisição inválida: "dados" deve conter um array ou "messages"');
+        return res.status(400).json({ error: 'Payload inválido: "dados" deve conter um array ou "messages"' });
       }
-
-      if (messages.length > MAX_MESSAGES_PER_REQUEST) {
-        console.error(`Número de mensagens (${messages.length}) excede o limite`);
-        return res.status(400).json({ error: `Máximo de ${MAX_MESSAGES_PER_REQUEST} mensagens` });
-      }
-
-      if (!global.client) {
-        console.error('Cliente WhatsApp não conectado');
-        return res.status(503).json({ error: 'WhatsApp não conectado' });
-      }
-
-      const sendPromises = messages.map(msg => {
-        const { telefone, message } = msg;
-        if (!telefone || !message) return { success: false, error: 'Telefone ou mensagem ausente' };
-        const delay = Math.floor(Math.random() * (MAX_DELAY - MIN_DELAY + 1)) + MIN_DELAY;
-        return sendMessageWithDelay({ telefone, message }, delay);
-      });
-
-      res.status(202).json({ message: 'Enviando mensagens' });
-      const results = await Promise.all(sendPromises);
-      console.log('Resultado do envio:', results);
-    } catch (error) {
-      console.error('Erro em /send:', error.message);
-      res.status(500).json({ error: 'Erro ao processar envio' });
     }
-  });
+    // Caso 2: Payload com "number" e "message" (formato alternativo)
+    else if (messages.number && messages.message) {
+      messages = [{ telefone: messages.number, message: messages.message }];
+    }
+    // Caso 3: Payload direto (formato esperado, ex.: Wix ajustado)
+    else if (!Array.isArray(messages)) {
+      console.error('Requisição inválida: o corpo deve ser um array de mensagens');
+      return res.status(400).json({ error: 'O corpo da requisição deve ser um array de mensagens' });
+    }
+
+    if (messages.length > MAX_MESSAGES_PER_REQUEST) {
+      console.error(`Número de mensagens (${messages.length}) excede o limite`);
+      return res.status(400).json({ error: `Máximo de ${MAX_MESSAGES_PER_REQUEST} mensagens` });
+    }
+
+    if (!global.client) {
+      console.error('Cliente WhatsApp não conectado');
+      return res.status(503).json({ error: 'WhatsApp não conectado' });
+    }
+
+    const sendPromises = messages.map(msg => {
+      const { telefone, message } = msg;
+      if (!telefone || !message) return { success: false, error: 'Telefone ou mensagem ausente' };
+      const delay = Math.floor(Math.random() * (MAX_DELAY - MIN_DELAY + 1)) + MIN_DELAY;
+      return sendMessageWithDelay({ telefone, message }, delay);
+    });
+
+    res.status(202).json({ message: 'Enviando mensagens' });
+    const results = await Promise.all(sendPromises);
+    console.log('Resultado do envio:', results);
+  } catch (error) {
+    console.error('Erro em /send:', error.message);
+    return res.status(500).json({ error: 'Erro ao processar envio' });
+  }
 });
 
 // Rota de ping
