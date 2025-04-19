@@ -76,7 +76,7 @@ venom
         console.error('Erro ao iniciar cliente WhatsApp:', error);
     });
 
-// Gera o QR code e o converte em link
+// Gera o QR code e o converte em link usando qrserver
 venom.create({
     session: 'session-name',
     multidevice: true
@@ -85,9 +85,9 @@ venom.create({
         console.log('QR Code gerado:');
         qrcode.generate(qr, { small: true }); // Exibe no terminal para depuração
 
-        // Gera um link de imagem usando a API do Google Chart
+        // Gera um link de imagem usando a API do qrserver
         const encodedQr = encodeURIComponent(qr);
-        qrCodeLink = `https://chart.googleapis.com/chart?cht=qr&chs=300x300&chl=${encodedQr}`;
+        qrCodeLink = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodedQr}`;
         console.log('Link do QR Code:', qrCodeLink);
     });
 });
