@@ -11,7 +11,7 @@ app.use(cors());
 global.client = null;
 
 // Função para gerar delay aleatório (25 a 30 segundos)
-const getRandomDelay = () => Math.floor(Math.random() * (30 - 25 + 1)) + 25) * 1000;
+const getRandomDelay = () => Math.floor(Math.random() * (30 - 25 + 1) + 25) * 1000;
 
 // Função para enviar mensagem com delay
 const sendMessageWithDelay = async ({ telefone, message }, delay) => {
@@ -68,6 +68,11 @@ app.post('/send', async (req, res) => {
     if (!msg.telefone || !msg.message) {
       console.log('Mensagem inválida: "telefone" e "message" são obrigatórios', msg);
       return res.status(400).json({ error: 'Mensagem inválida: "telefone" e "message" são obrigatórios' });
+    }
+    const cleanNumber = msg.telefone.toString().replace(/[^0-9]/g, '');
+    if (cleanNumber.length < 10) {
+      console.log('Número de telefone inválido:', msg.telefone);
+      return res.status(400).json({ error: 'Número de telefone inválido' });
     }
   }
 
