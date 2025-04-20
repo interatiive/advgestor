@@ -11,6 +11,7 @@
     "whatsapp-web.js": "^1.23.0",
     "cors": "^2.8.5",
     "node-fetch": "^2.7.0",
-    "puppeteer-core": "^22.15.0"
+    "puppeteer-core": "^22.15.0",
+    "qrcode": "^1.5.3"
   }
 }
