@@ -46,7 +46,11 @@ setInterval(checkInactiveNumbers, 10 * 60 * 1000);
 venom
     .create({
         session: 'session-name',
-        multidevice: true
+        multidevice: true,
+        puppeteerOptions: {
+            executablePath: '/usr/bin/google-chrome', // Caminho do Chrome instalado manualmente
+            args: ['--no-sandbox', '--disable-setuid-sandbox'] // Necessário para rodar no Render
+        }
     })
     .then((clientInstance) => {
         client = clientInstance;
