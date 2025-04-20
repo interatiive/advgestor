@@ -36,8 +36,8 @@ RUN apt-get update && apt-get install -y \
 # Copia package.json e package-lock.json (se existir)
 COPY package*.json ./
 
-# Limpa o cache e instala dependências
-RUN npm cache clean --force && npm install
+# Limpa o cache do npm e instala dependências
+RUN npm cache clean --force && rm -rf node_modules && npm install --legacy-peer-deps
 
 # Instala git (conforme mencionado anteriormente)
 RUN apt-get update && apt-get install -y git
