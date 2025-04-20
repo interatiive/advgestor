@@ -2,6 +2,7 @@ const express = require('express');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const cors = require('cors');
 const fetch = require('node-fetch');
+const qrcode = require('qrcode');
 
 const app = express();
 app.use(express.json());
@@ -16,35 +17,57 @@ const client = new Client({
 });
 
 let qrCodeData = null;
+let isClientReady = false;
 const contactsWithDoctor = new Map();
 
-client.on('qr', (qr) => {
-  qrCodeData = qr;
-  console.log('QR Code gerado');
-});
+// Função para inicializar o cliente com retentativas
+async function initializeClient() {
+  try {
+    client.on('qr', (qr) => {
+      qrCodeData = qr;
+      console.log('QR Code gerado');
+    });
 
-client.on('ready', () => {
-  console.log('Cliente WhatsApp-Web.js pronto!');
-});
+    client.on('ready', () => {
+      isClientReady = true;
+      console.log('Cliente WhatsApp-Web.js pronto!');
+    });
 
-client.on('message', async (message) => {
-  const messageBody = message.body ? message.body.toLowerCase() : '';
-  const doctorVariations = ['dr. eliah', 'dr eliah', 'doutor eliah', 'dr.eliah'];
+    client.on('disconnected', (reason) => {
+      console.log('Cliente desconectado:', reason);
+      isClientReady = false;
+      qrCodeData = null;
+      setTimeout(initializeClient, 5000); // Tenta reconectar após 5 segundos
+    });
 
-  if (doctorVariations.some(variation => messageBody.includes(variation))) {
-    const contactId = message.from;
-    contactsWithDoctor.set(contactId, Date.now());
+    client.on('message', async (message) => {
+      const messageBody = message.body ? message.body.toLowerCase() : '';
+      const doctorVariations = ['dr. eliah', 'dr eliah', 'doutor eliah', 'dr.eliah'];
 
-    fetch('https://hook.us1.make.com/replace_with_your_make_webhook_url', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contactId, message: message.body })
-    })
-      .then(response => console.log('Webhook enviado:', response.status))
-      .catch(error => console.error('Erro ao enviar webhook:', error));
+      if (doctorVariations.some(variation => messageBody.includes(variation))) {
+        const contactId = message.from;
+        contactsWithDoctor.set(contactId, Date.now());
+
+        fetch('https://hook.us1.make.com/replace_with_your_make_webhook_url', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contactId, message: message.body })
+        })
+          .then(response => console.log('Webhook enviado:', response.status))
+          .catch(error => console.error('Erro ao enviar webhook:', error));
+      }
+    });
+
+    await client.initialize();
+  } catch (error) {
+    console.error('Erro ao inicializar cliente WhatsApp:', error);
+    setTimeout(initializeClient, 5000); // Tenta novamente após 5 segundos
   }
-});
+}
 
+initializeClient();
+
+// Limpeza de contatos inativos
 setInterval(() => {
   const now = Date.now();
   for (const [contactId, timestamp] of contactsWithDoctor) {
@@ -55,22 +78,31 @@ setInterval(() => {
   }
 }, 10 * 60 * 1000);
 
-client.initialize();
-
 app.get('/', (req, res) => {
   res.json({ message: 'Servidor rodando' });
 });
 
-app.get('/qrcode', (req, res) => {
+app.get('/qrcode', async (req, res) => {
   if (!qrCodeData) {
-    return res.status(500).json({ error: 'QR Code não disponível' });
+    return res.status(500).json({ error: 'QR Code não disponível. O cliente pode já estar conectado ou ainda não foi gerado.' });
   }
 
-  const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${encodeURIComponent(qrCodeData)}`;
-  res.redirect(qrCodeUrl);
+  try {
+    // Gera o QR code como uma imagem diretamente
+    const qrCodeImage = await qrcode.toDataURL(qrCodeData);
+    res.set('Content-Type', 'image/png');
+    res.send(Buffer.from(qrCodeImage.split(',')[1], 'base64'));
+  } catch (error) {
+    console.error('Erro ao gerar imagem do QR Code:', error);
+    res.status(500).json({ error: 'Erro ao gerar imagem do QR Code' });
+  }
 });
 
 app.post('/send', async (req, res) => {
+  if (!isClientReady) {
+    return res.status(500).json({ error: 'Cliente WhatsApp não está pronto' });
+  }
+
   let messages = [];
 
   if (req.body.dados && req.body.cobranca) {
