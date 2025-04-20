@@ -8,6 +8,11 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
+// Obtém o hostname do Render dinamicamente
+const HOSTNAME = process.env.RENDER_EXTERNAL_HOSTNAME || 'localhost:3000';
+const PROTOCOL = HOSTNAME.includes('localhost') ? 'http' : 'https';
+const QR_CODE_URL = `${PROTOCOL}://${HOSTNAME}/qrcode`;
+
 const client = new Client({
   authStrategy: new LocalAuth(),
   puppeteer: {
@@ -18,18 +23,26 @@ const client = new Client({
 
 let qrCodeData = null;
 let isClientReady = false;
+let isGeneratingQr = false; // Flag para evitar múltiplas gerações de QR code
 const contactsWithDoctor = new Map();
 
 // Função para inicializar o cliente com retentativas
 async function initializeClient() {
   try {
     client.on('qr', (qr) => {
+      if (isGeneratingQr) {
+        console.log('QR Code já está sendo gerado, ignorando novo evento.');
+        return;
+      }
+      isGeneratingQr = true;
       qrCodeData = qr;
-      console.log('QR Code gerado');
+      console.log(`QR Code gerado! Acesse o QR code em: ${QR_CODE_URL}`);
     });
 
     client.on('ready', () => {
       isClientReady = true;
+      isGeneratingQr = false;
+      qrCodeData = null; // Limpa o QR code após a conexão
       console.log('Cliente WhatsApp-Web.js pronto!');
     });
 
@@ -37,7 +50,8 @@ async function initializeClient() {
       console.log('Cliente desconectado:', reason);
       isClientReady = false;
       qrCodeData = null;
-      setTimeout(initializeClient, 5000); // Tenta reconectar após 5 segundos
+      isGeneratingQr = false;
+      setTimeout(initializeClient, 10000); // Tenta reconectar após 10 segundos
     });
 
     client.on('message', async (message) => {
@@ -61,7 +75,8 @@ async function initializeClient() {
     await client.initialize();
   } catch (error) {
     console.error('Erro ao inicializar cliente WhatsApp:', error);
-    setTimeout(initializeClient, 5000); // Tenta novamente após 5 segundos
+    isGeneratingQr = false;
+    setTimeout(initializeClient, 10000); // Tenta novamente após 10 segundos
   }
 }
 
@@ -83,13 +98,22 @@ app.get('/', (req, res) => {
 });
 
 app.get('/qrcode', async (req, res) => {
+  console.log('Rota /qrcode acessada. Estado atual:', { isClientReady, qrCodeDataAvailable: !!qrCodeData });
+
+  if (isClientReady) {
+    console.log('Cliente já está conectado, QR code não é necessário.');
+    return res.status(200).json({ message: 'Cliente já está conectado ao WhatsApp.' });
+  }
+
   if (!qrCodeData) {
-    return res.status(500).json({ error: 'QR Code não disponível. O cliente pode já estar conectado ou ainda não foi gerado.' });
+    console.log('QR Code não disponível.');
+    return res.status(500).json({ error: 'QR Code não disponível. O cliente pode estar em processo de inicialização.' });
   }
 
   try {
-    // Gera o QR code como uma imagem diretamente
+    console.log('Gerando imagem do QR Code...');
     const qrCodeImage = await qrcode.toDataURL(qrCodeData);
+    console.log('Imagem do QR Code gerada com sucesso.');
     res.set('Content-Type', 'image/png');
     res.send(Buffer.from(qrCodeImage.split(',')[1], 'base64'));
   } catch (error) {
