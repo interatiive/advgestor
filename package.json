@@ -12,5 +12,10 @@
     "cors": "^2.8.5",
     "node-fetch": "^2.7.0",
     "puppeteer-core": "^22.15.0"
+  },
+  "resolutions": {
+    "rimraf": "^5.0.0",
+    "glob": "^10.0.0",
+    "puppeteer": "npm:puppeteer-core@^22.15.0"
   }
 }
