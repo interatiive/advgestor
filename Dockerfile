@@ -4,7 +4,7 @@ FROM node:18
 # Define o diretório de trabalho
 WORKDIR /usr/src/app
 
-# Instala dependências do sistema e FFmpeg
+# Instala dependências do sistema, ferramentas de compilação e FFmpeg
 RUN apt-get update && apt-get install -y \
     wget \
     ca-certificates \
@@ -25,15 +25,21 @@ RUN apt-get update && apt-get install -y \
     libasound2 \
     libxshmfence1 \
     libxfixes3 \
+    libxss1 \
+    libxtst6 \
     ffmpeg \
+    build-essential \
+    g++ \
+    make \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Instala uma versão específica do Chromium (Chrome 104, revisão r1045629)
 RUN wget -O /tmp/chromium.zip https://www.googleapis.com/download/storage/v1/b/chromium-browser-snapshots/o/Linux_x64%2F1045629%2Fchrome-linux.zip?alt=media \
     && unzip /tmp/chromium.zip -d /usr/local/ \
     && mv /usr/local/chrome-linux /usr/local/chromium \
-    && ln -s /usr/local/chromium/chrome /usr/bin/chromium \
-    && rm /tmp/chromium.zip
+    && ln -sf /usr/local/chromium/chrome /usr/bin/chromium \
+    && rm /tmp/chromium.zip \
+    && chmod +x /usr/bin/chromium
 
 # Copia package.json e package-lock.json (se existir)
 COPY package*.json ./
