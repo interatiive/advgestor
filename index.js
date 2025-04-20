@@ -3,8 +3,8 @@ const { Client, LocalAuth } = require('whatsapp-web.js');
 const cors = require('cors');
 const fetch = require('node-fetch');
 const qrcode = require('qrcode');
-const { whisper } = require('whisper-node');
-const ffmpeg = require('fluent-ffmpeg');
+// const { whisper } = require('whisper-node'); // Comentado temporariamente
+// const ffmpeg = require('fluent-ffmpeg'); // Comentado temporariamente
 const fs = require('fs');
 const path = require('path');
 
@@ -45,8 +45,8 @@ const client = new Client({
   authStrategy: new LocalAuth(),
   puppeteer: {
     executablePath: '/usr/bin/chromium',
-    args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    timeout: 60000 // Aumenta o timeout para 60 segundos
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
+    timeout: 120000 // Aumenta o timeout para 120 segundos
   }
 });
 
@@ -55,35 +55,6 @@ let isClientReady = false;
 let lastQrGenerationTime = 0; // Timestamp da última geração de QR code
 const QR_CODE_EXPIRY = 2 * 60 * 1000; // 2 minutos de validade para o QR code
 const contactsWithDoctor = new Map();
-
-// Função para converter áudio para formato WAV (necessário para Whisper)
-async function convertToWav(inputPath, outputPath) {
-  return new Promise((resolve, reject) => {
-    ffmpeg(inputPath)
-      .toFormat('wav')
-      .on('end', () => resolve())
-      .on('error', (err) => reject(err))
-      .save(outputPath);
-  });
-}
-
-// Função para transcrever áudio
-async function transcribeAudio(audioPath) {
-  try {
-    const wavPath = audioPath.replace(/\.[^.]+$/, '.wav');
-    await convertToWav(audioPath, wavPath);
-    const transcript = await whisper(wavPath, {
-      modelName: 'tiny', // Usa um modelo menor para reduzir consumo de recursos
-      language: 'pt' // Define o idioma como português
-    });
-    fs.unlinkSync(audioPath); // Remove o arquivo original
-    fs.unlinkSync(wavPath); // Remove o arquivo WAV temporário
-    return transcript.map(segment => segment.text).join(' ');
-  } catch (error) {
-    console.error('Erro ao transcrever áudio:', error);
-    return null;
-  }
-}
 
 // Função para inicializar o cliente com retentativas
 async function initializeClient() {
@@ -130,7 +101,8 @@ async function initializeClient() {
 
       let messageBody = message.body ? message.body.toLowerCase() : '';
 
-      // Verifica se a mensagem é um áudio
+      // Transcrição de áudio desativada temporariamente
+      /*
       if (message.type === 'ptt' || message.type === 'audio') {
         try {
           const media = await message.downloadMedia();
@@ -149,6 +121,7 @@ async function initializeClient() {
           console.error('Erro ao processar áudio:', error);
         }
       }
+      */
 
       const doctorVariations = ['dr. eliah', 'dr eliah', 'doutor eliah', 'dr.eliah'];
       if (messageBody && doctorVariations.some(variation => messageBody.includes(variation))) {
