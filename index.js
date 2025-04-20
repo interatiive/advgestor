@@ -3,6 +3,10 @@ const { Client, LocalAuth } = require('whatsapp-web.js');
 const cors = require('cors');
 const fetch = require('node-fetch');
 const qrcode = require('qrcode');
+const { whisper } = require('whisper-node');
+const ffmpeg = require('fluent-ffmpeg');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 app.use(express.json());
@@ -27,12 +31,40 @@ let lastQrGenerationTime = 0; // Timestamp da última geração de QR code
 const QR_CODE_EXPIRY = 2 * 60 * 1000; // 2 minutos de validade para o QR code
 const contactsWithDoctor = new Map();
 
+// Função para converter áudio para formato WAV (necessário para Whisper)
+async function convertToWav(inputPath, outputPath) {
+  return new Promise((resolve, reject) => {
+    ffmpeg(inputPath)
+      .toFormat('wav')
+      .on('end', () => resolve())
+      .on('error', (err) => reject(err))
+      .save(outputPath);
+  });
+}
+
+// Função para transcrever áudio
+async function transcribeAudio(audioPath) {
+  try {
+    const wavPath = audioPath.replace(/\.[^.]+$/, '.wav');
+    await convertToWav(audioPath, wavPath);
+    const transcript = await whisper(wavPath, {
+      modelName: 'base', // Modelo leve do Whisper
+      language: 'pt' // Define o idioma como português
+    });
+    fs.unlinkSync(audioPath); // Remove o arquivo original
+    fs.unlinkSync(wavPath); // Remove o arquivo WAV temporário
+    return transcript.map(segment => segment.text).join(' ');
+  } catch (error) {
+    console.error('Erro ao transcrever áudio:', error);
+    return null;
+  }
+}
+
 // Função para inicializar o cliente com retentativas
 async function initializeClient() {
   try {
     client.on('qr', (qr) => {
       const now = Date.now();
-      // Só atualiza o QR code se o anterior expirou ou é o primeiro
       if (now - lastQrGenerationTime > QR_CODE_EXPIRY || !qrCodeData) {
         qrCodeData = qr;
         lastQrGenerationTime = now;
@@ -49,38 +81,74 @@ async function initializeClient() {
       console.log('Cliente WhatsApp-Web.js pronto!');
     });
 
+    client.on('authenticated', () => {
+      console.log('Cliente autenticado com sucesso!');
+    });
+
+    client.on('auth_failure', (msg) => {
+      console.error('Falha na autenticação:', msg);
+      isClientReady = false;
+      qrCodeData = null;
+      lastQrGenerationTime = 0;
+    });
+
     client.on('disconnected', (reason) => {
       console.log('Cliente desconectado:', reason);
       isClientReady = false;
       qrCodeData = null;
       lastQrGenerationTime = 0;
-      setTimeout(initializeClient, 15000); // Tenta reconectar após 15 segundos
+      setTimeout(initializeClient, 20000); // Tenta reconectar após 20 segundos
     });
 
     client.on('message', async (message) => {
-      console.log('Mensagem recebida:', message.body);
-      const messageBody = message.body ? message.body.toLowerCase() : '';
-      const doctorVariations = ['dr. eliah', 'dr eliah', 'doutor eliah', 'dr.eliah'];
+      console.log('Mensagem recebida:', { from: message.from, type: message.type, body: message.body });
 
-      if (doctorVariations.some(variation => messageBody.includes(variation))) {
+      let messageBody = message.body ? message.body.toLowerCase() : '';
+
+      // Verifica se a mensagem é um áudio
+      if (message.type === 'ptt' || message.type === 'audio') {
+        try {
+          const media = await message.downloadMedia();
+          if (media) {
+            const audioPath = path.join(__dirname, `audio-${Date.now()}.ogg`);
+            fs.writeFileSync(audioPath, Buffer.from(media.data, 'base64'));
+            const transcript = await transcribeAudio(audioPath);
+            if (transcript) {
+              console.log('Áudio transcrito:', transcript);
+              messageBody = transcript.toLowerCase();
+            } else {
+              console.log('Falha ao transcrever áudio.');
+            }
+          }
+        } catch (error) {
+          console.error('Erro ao processar áudio:', error);
+        }
+      }
+
+      const doctorVariations = ['dr. eliah', 'dr eliah', 'doutor eliah', 'dr.eliah'];
+      if (messageBody && doctorVariations.some(variation => messageBody.includes(variation))) {
         const contactId = message.from;
         contactsWithDoctor.set(contactId, Date.now());
         console.log(`Mensagem com "Dr. Eliah" detectada de ${contactId}`);
 
-        fetch('https://hook.us1.make.com/replace_with_your_make_webhook_url', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ contactId, message: message.body })
-        })
-          .then(response => console.log('Webhook enviado:', response.status))
-          .catch(error => console.error('Erro ao enviar webhook:', error));
+        try {
+          const response = await fetch('https://hook.us1.make.com/replace_with_your_make_webhook_url', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ contactId, message: messageBody })
+          });
+          console.log('Webhook enviado:', response.status);
+        } catch (error) {
+          console.error('Erro ao enviar webhook:', error);
+        }
       }
     });
 
+    console.log('Inicializando cliente WhatsApp...');
     await client.initialize();
   } catch (error) {
     console.error('Erro ao inicializar cliente WhatsApp:', error);
-    setTimeout(initializeClient, 15000); // Tenta novamente após 15 segundos
+    setTimeout(initializeClient, 20000); // Tenta novamente após 20 segundos
   }
 }
 
@@ -98,7 +166,7 @@ setInterval(() => {
 }, 10 * 60 * 1000);
 
 app.get('/', (req, res) => {
-  console.log('Requisição recebida no endpoint / (keep-alive)');
+  console.log('Requisição recebida no endpoint / (keep-alive)', { ip: req.ip, timestamp: new Date().toISOString() });
   res.json({ message: 'Servidor rodando' });
 });
 
@@ -161,6 +229,7 @@ app.post('/send', async (req, res) => {
     for (const msg of messages) {
       const phoneNumber = msg.number.replace(/\D/g, '');
       const chatId = `${phoneNumber}@c.us`;
+      console.log(`Tentando enviar mensagem para ${chatId}: ${msg.message}`);
       await client.sendMessage(chatId, msg.message);
       console.log(`Mensagem enviada para ${phoneNumber}`);
       const delay = Math.floor(Math.random() * (30000 - 25000 + 1)) + 25000;
