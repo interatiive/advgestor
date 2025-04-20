@@ -9,7 +9,26 @@ const fs = require('fs');
 const path = require('path');
 
 const app = express();
-app.use(express.json());
+
+// Middleware para logar o corpo bruto da requisição antes do parsing
+app.use(express.raw({ type: '*/*' }), (req, res, next) => {
+  if (req.body && req.body.length > 0) {
+    console.log('Corpo bruto da requisição recebido:', req.body.toString());
+  } else {
+    console.log('Corpo bruto da requisição vazio.');
+  }
+  // Reinterpreta o corpo como JSON
+  if (req.headers['content-type']?.includes('application/json')) {
+    try {
+      req.body = JSON.parse(req.body.toString());
+    } catch (error) {
+      console.error('Erro ao parsear JSON:', error.message);
+      return res.status(400).json({ error: 'JSON inválido: ' + error.message });
+    }
+  }
+  next();
+});
+
 app.use(cors());
 
 // Obtém o hostname do Render dinamicamente
