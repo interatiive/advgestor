@@ -23,26 +23,29 @@ const client = new Client({
 
 let qrCodeData = null;
 let isClientReady = false;
-let isGeneratingQr = false; // Flag para evitar múltiplas gerações de QR code
+let lastQrGenerationTime = 0; // Timestamp da última geração de QR code
+const QR_CODE_EXPIRY = 2 * 60 * 1000; // 2 minutos de validade para o QR code
 const contactsWithDoctor = new Map();
 
 // Função para inicializar o cliente com retentativas
 async function initializeClient() {
   try {
     client.on('qr', (qr) => {
-      if (isGeneratingQr) {
-        console.log('QR Code já está sendo gerado, ignorando novo evento.');
-        return;
+      const now = Date.now();
+      // Só atualiza o QR code se o anterior expirou ou é o primeiro
+      if (now - lastQrGenerationTime > QR_CODE_EXPIRY || !qrCodeData) {
+        qrCodeData = qr;
+        lastQrGenerationTime = now;
+        console.log(`Novo QR Code gerado! Acesse o QR code em: ${QR_CODE_URL}`);
+      } else {
+        console.log('QR Code recente ainda válido, ignorando novo evento.');
       }
-      isGeneratingQr = true;
-      qrCodeData = qr;
-      console.log(`QR Code gerado! Acesse o QR code em: ${QR_CODE_URL}`);
     });
 
     client.on('ready', () => {
       isClientReady = true;
-      isGeneratingQr = false;
       qrCodeData = null; // Limpa o QR code após a conexão
+      lastQrGenerationTime = 0;
       console.log('Cliente WhatsApp-Web.js pronto!');
     });
 
@@ -50,17 +53,19 @@ async function initializeClient() {
       console.log('Cliente desconectado:', reason);
       isClientReady = false;
       qrCodeData = null;
-      isGeneratingQr = false;
-      setTimeout(initializeClient, 10000); // Tenta reconectar após 10 segundos
+      lastQrGenerationTime = 0;
+      setTimeout(initializeClient, 15000); // Tenta reconectar após 15 segundos
     });
 
     client.on('message', async (message) => {
+      console.log('Mensagem recebida:', message.body);
       const messageBody = message.body ? message.body.toLowerCase() : '';
       const doctorVariations = ['dr. eliah', 'dr eliah', 'doutor eliah', 'dr.eliah'];
 
       if (doctorVariations.some(variation => messageBody.includes(variation))) {
         const contactId = message.from;
         contactsWithDoctor.set(contactId, Date.now());
+        console.log(`Mensagem com "Dr. Eliah" detectada de ${contactId}`);
 
         fetch('https://hook.us1.make.com/replace_with_your_make_webhook_url', {
           method: 'POST',
@@ -75,8 +80,7 @@ async function initializeClient() {
     await client.initialize();
   } catch (error) {
     console.error('Erro ao inicializar cliente WhatsApp:', error);
-    isGeneratingQr = false;
-    setTimeout(initializeClient, 10000); // Tenta novamente após 10 segundos
+    setTimeout(initializeClient, 15000); // Tenta novamente após 15 segundos
   }
 }
 
@@ -94,6 +98,7 @@ setInterval(() => {
 }, 10 * 60 * 1000);
 
 app.get('/', (req, res) => {
+  console.log('Requisição recebida no endpoint / (keep-alive)');
   res.json({ message: 'Servidor rodando' });
 });
 
@@ -105,9 +110,12 @@ app.get('/qrcode', async (req, res) => {
     return res.status(200).json({ message: 'Cliente já está conectado ao WhatsApp.' });
   }
 
-  if (!qrCodeData) {
-    console.log('QR Code não disponível.');
-    return res.status(500).json({ error: 'QR Code não disponível. O cliente pode estar em processo de inicialização.' });
+  const now = Date.now();
+  if (!qrCodeData || (now - lastQrGenerationTime > QR_CODE_EXPIRY)) {
+    console.log('QR Code expirado ou não disponível. Aguardando novo QR code...');
+    qrCodeData = null; // Força a geração de um novo QR code
+    lastQrGenerationTime = 0;
+    return res.status(500).json({ error: 'QR Code não disponível ou expirado. Aguarde um novo QR code.' });
   }
 
   try {
@@ -123,21 +131,30 @@ app.get('/qrcode', async (req, res) => {
 });
 
 app.post('/send', async (req, res) => {
+  console.log('Requisição recebida na rota /send. Corpo da requisição:', req.body);
+
   if (!isClientReady) {
+    console.log('Cliente WhatsApp não está pronto.');
     return res.status(500).json({ error: 'Cliente WhatsApp não está pronto' });
   }
 
   let messages = [];
 
-  if (req.body.dados && req.body.cobranca) {
-    messages = req.body.dados.map(item => ({
-      number: item['Telefone para Envio'],
-      message: req.body.cobranca
-    }));
-  } else if (Array.isArray(req.body)) {
-    messages = req.body;
-  } else {
-    return res.status(400).json({ error: 'Formato de requisição inválido' });
+  try {
+    if (req.body.dados && req.body.cobranca) {
+      messages = req.body.dados.map(item => ({
+        number: item['Telefone para Envio'],
+        message: req.body.cobranca
+      }));
+    } else if (Array.isArray(req.body)) {
+      messages = req.body;
+    } else {
+      console.log('Formato de requisição inválido:', req.body);
+      return res.status(400).json({ error: 'Formato de requisição inválido' });
+    }
+  } catch (error) {
+    console.error('Erro ao processar corpo da requisição:', error);
+    return res.status(400).json({ error: 'Erro ao processar corpo da requisição: JSON inválido' });
   }
 
   try {
