@@ -4,7 +4,7 @@ FROM node:18
 # Define o diretório de trabalho
 WORKDIR /usr/src/app
 
-# Instala dependências do sistema e o Chromium
+# Instala dependências do sistema, Chromium e FFmpeg
 RUN apt-get update && apt-get install -y \
     wget \
     ca-certificates \
@@ -26,6 +26,7 @@ RUN apt-get update && apt-get install -y \
     libasound2 \
     libxshmfence1 \
     libxfixes3 \
+    ffmpeg \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Copia package.json e package-lock.json (se existir)
