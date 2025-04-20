@@ -12,8 +12,6 @@
     "cors": "^2.8.5",
     "node-fetch": "^2.7.0",
     "puppeteer-core": "^22.15.0",
-    "qrcode": "^1.5.3",
-    "whisper-node": "^0.2.0",
-    "fluent-ffmpeg": "^2.1.2"
+    "qrcode": "^1.5.3"
   }
 }
