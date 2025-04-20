@@ -10,21 +10,26 @@ const path = require('path');
 
 const app = express();
 
-// Middleware para logar o corpo bruto da requisição antes do parsing
+// Middleware para logar o corpo bruto da requisição e cabeçalhos
 app.use(express.raw({ type: '*/*' }), (req, res, next) => {
+  console.log('Cabeçalhos da requisição:', req.headers);
   if (req.body && req.body.length > 0) {
-    console.log('Corpo bruto da requisição recebido:', req.body.toString());
+    const bodyString = req.body.toString();
+    console.log('Corpo bruto da requisição recebido:', bodyString);
+    // Tenta parsear o JSON
+    if (req.headers['content-type']?.includes('application/json')) {
+      try {
+        req.body = JSON.parse(bodyString);
+      } catch (error) {
+        console.error('Erro ao parsear JSON:', error.message);
+        return res.status(400).json({ error: 'JSON inválido: ' + error.message });
+      }
+    } else {
+      console.log('Content-Type não é application/json:', req.headers['content-type']);
+      return res.status(400).json({ error: 'Content-Type deve ser application/json' });
+    }
   } else {
     console.log('Corpo bruto da requisição vazio.');
-  }
-  // Reinterpreta o corpo como JSON
-  if (req.headers['content-type']?.includes('application/json')) {
-    try {
-      req.body = JSON.parse(req.body.toString());
-    } catch (error) {
-      console.error('Erro ao parsear JSON:', error.message);
-      return res.status(400).json({ error: 'JSON inválido: ' + error.message });
-    }
   }
   next();
 });
@@ -40,7 +45,8 @@ const client = new Client({
   authStrategy: new LocalAuth(),
   puppeteer: {
     executablePath: '/usr/bin/chromium',
-    args: ['--no-sandbox', '--disable-setuid-sandbox']
+    args: ['--no-sandbox', '--disable-setuid-sandbox'],
+    timeout: 60000 // Aumenta o timeout para 60 segundos
   }
 });
 
@@ -67,7 +73,7 @@ async function transcribeAudio(audioPath) {
     const wavPath = audioPath.replace(/\.[^.]+$/, '.wav');
     await convertToWav(audioPath, wavPath);
     const transcript = await whisper(wavPath, {
-      modelName: 'base', // Modelo leve do Whisper
+      modelName: 'tiny', // Usa um modelo menor para reduzir consumo de recursos
       language: 'pt' // Define o idioma como português
     });
     fs.unlinkSync(audioPath); // Remove o arquivo original
@@ -228,7 +234,7 @@ app.post('/send', async (req, res) => {
   let messages = [];
 
   try {
-    // Formato do Wix: {"messages":[{"telefone":"5575992017551","message":"..."}]}
+    // Formato do Wix: {"messages":[{"telefone":"...","message":"..."}]}
     if (req.body.messages && Array.isArray(req.body.messages)) {
       messages = req.body.messages.map(item => ({
         number: item.telefone,
