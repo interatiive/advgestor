@@ -11,9 +11,8 @@ WORKDIR /usr/src/app
 RUN apt-get update && apt-get install -y \
 wget \
 gnupg \
-&& wget -q -O /tmp/chrome-key.asc https://dl-ssl.google.com/linux/linux_signing_key.pub \
-&& gpg --dearmor &lt; /tmp/chrome-key.asc &gt; /etc/apt/trusted.gpg.d/google-chrome.gpg \
-&& rm /tmp/chrome-key.asc \
+ca-certificates \
+&& wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor &gt; /etc/apt/trusted.gpg.d/google-chrome.gpg \
 && echo "deb \[arch=amd64\] http://dl.google.com/linux/chrome/deb/ stable main" &gt; /etc/apt/sources.list.d/google-chrome.list \
 && apt-get update && apt-get install -y \
 google-chrome-stable \
