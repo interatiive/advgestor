@@ -4,10 +4,11 @@ FROM node:18
 # Define o diretório de trabalho
 WORKDIR /usr/src/app
 
-# Instala dependências do sistema necessárias para o Chrome e baixa o pacote .deb do Chrome
+# Instala dependências do sistema e o Chromium
 RUN apt-get update && apt-get install -y \
     wget \
     ca-certificates \
+    chromium \
     libnss3 \
     libx11-xcb1 \
     libxcomposite1 \
@@ -25,9 +26,6 @@ RUN apt-get update && apt-get install -y \
     libasound2 \
     libxshmfence1 \
     libxfixes3 \
-    && wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
-    && dpkg -i google-chrome-stable_current_amd64.deb || apt-get install -f -y \
-    && rm google-chrome-stable_current_amd64.deb \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Copia package.json e package-lock.json (se existir)
