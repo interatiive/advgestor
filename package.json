@@ -4,11 +4,12 @@
   "description": "API para enviar mensagens via WhatsApp",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "preinstall": "npx npm-force-resolutions"
   },
   "dependencies": {
     "express": "^4.19.2",
-    "venom-bot": "^5.1.0",
+    "venom-bot": "^5.1.2",
     "cors": "^2.8.5",
     "node-fetch": "^2.7.0",
     "puppeteer-core": "^22.15.0"
@@ -17,5 +18,8 @@
     "rimraf": "^5.0.0",
     "glob": "^10.0.0",
     "puppeteer": "npm:puppeteer-core@^22.15.0"
+  },
+  "devDependencies": {
+    "npm-force-resolutions": "0.0.10"
   }
 }
