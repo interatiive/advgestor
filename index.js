@@ -228,14 +228,25 @@ app.post('/send', async (req, res) => {
   let messages = [];
 
   try {
-    if (req.body.dados && req.body.cobranca) {
+    // Formato do Wix: {"messages":[{"telefone":"5575992017551","message":"..."}]}
+    if (req.body.messages && Array.isArray(req.body.messages)) {
+      messages = req.body.messages.map(item => ({
+        number: item.telefone,
+        message: item.message
+      }));
+    }
+    // Formato antigo do Wix: {dados:...,cobranca:...}
+    else if (req.body.dados && req.body.cobranca) {
       messages = req.body.dados.map(item => ({
         number: item['Telefone para Envio'],
         message: req.body.cobranca
       }));
-    } else if (Array.isArray(req.body)) {
+    }
+    // Formato direto: [{"number":...,"message":...}]
+    else if (Array.isArray(req.body)) {
       messages = req.body;
-    } else {
+    }
+    else {
       console.log('Formato de requisição inválido:', req.body);
       return res.status(400).json({ error: 'Formato de requisição inválido' });
     }
