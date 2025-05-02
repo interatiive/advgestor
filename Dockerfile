@@ -5,10 +5,12 @@ FROM node:18-alpine
 WORKDIR /app
 
 # Copiando package.json e package-lock.json (se existir)
-COPY package*.json ./
+COPY package.json ./
+# Verificando se o package.json foi copiado
+RUN test -f package.json || (echo "Erro: package.json não encontrado" && exit 1)
 
 # Instalando dependências
-RUN npm install --production
+RUN npm install --omit=dev
 
 # Copiando o código da aplicação
 COPY index.js .
