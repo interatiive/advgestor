@@ -1,22 +1,53 @@
-# Usando uma imagem base leve do Node.js
-FROM node:18-alpine
+# Use uma imagem base do Node.js
+FROM node:18-slim
 
-# Definindo o diretório de trabalho
-WORKDIR /app
+# Define o diretório de trabalho
+WORKDIR /usr/src/app
 
-# Copiando package.json e package-lock.json (se existir)
-COPY package.json ./
-# Verificando se o package.json foi copiado
-RUN test -f package.json || (echo "Erro: package.json não encontrado" && exit 1)
+# Instala dependências do sistema
+RUN apt-get update && apt-get install -y \
+    wget \
+    ca-certificates \
+    libnss3 \
+    libx11-xcb1 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxrandr2 \
+    libgbm1 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libpangocairo-1.0-0 \
+    libpango-1.0-0 \
+    libcairo2 \
+    libcups2 \
+    libdrm2 \
+    libxkbcommon0 \
+    libasound2 \
+    libxshmfence1 \
+    libxfixes3 \
+    libxss1 \
+    libxtst6 \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Instalando dependências
-RUN npm install --omit=dev
+# Instala uma versão específica do Chromium (Chrome 104, revisão r1045629)
+RUN wget -O /tmp/chromium.zip https://www.googleapis.com/download/storage/v1/b/chromium-browser-snapshots/o/Linux_x64%2F1045629%2Fchrome-linux.zip?alt=media \
+    && unzip /tmp/chromium.zip -d /usr/local/ \
+    && mv /usr/local/chrome-linux /usr/local/chromium \
+    && ln -sf /usr/local/chromium/chrome /usr/bin/chromium \
+    && rm /tmp/chromium.zip \
+    && chmod +x /usr/bin/chromium
 
-# Copiando o código da aplicação
-COPY index.js .
+# Copia package.json e package-lock.json (se existir)
+COPY package*.json ./
 
-# Expondo a porta configurada pelo Render
+# Limpa o cache do npm e instala dependências
+RUN npm cache clean --force && npm install
+
+# Copia o restante dos arquivos
+COPY . .
+
+# Expõe a porta
 EXPOSE 3000
 
-# Comando para iniciar a aplicação
-CMD ["node", "index.js"]
+# Comando para iniciar o servidor
+CMD ["npm", "start"]
