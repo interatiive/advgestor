@@ -1,0 +1,17 @@
+{
+  "name": "evolution-api-webhook",
+  "version": "1.0.0",
+  "description": "Webhook server for Evolution API messages",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "node-fetch": "^2.6.7"
+  },
+  "engines": {
+    "node": "18.x"
+  }
+}
